@@ -26,9 +26,11 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
 
-ifndef ICARUS
-    ICARUS = iverilog -Wall
+ifndef VSIM
+    VSIM = vsim
 endif
+
+MODELSIM_DO = darksimv_modelsim.do
 
 RTLS =  darksimv.v                      \
         ../rtl/darksocv.v               \
@@ -43,24 +45,16 @@ RTLS =  darksimv.v                      \
         ../rtl/lib/sdram/mt48lc16m16a2_ctrl.v
 
 INCS = ../rtl/config.vh
-XSIM = darksocv
-VCDS = darksocv.vcd
-TRCE = darksocv.txt
 
 ifeq ($(APPLICATION),spidemo)
-ICARUS += -DSPI=1
 RTLS += ../rtl/darkspi.v                \
         ../rtl/lib/spi/lis3dh_stub.v
 RTLS += ../rtl/lib/spi/spi_master.v
 SPIBB := 1
 ifdef SPIBB
-ICARUS += -DSPIBB=1
 RTLS += ../rtl/lib/spi/spi_master_bb.v
 endif
 SPI3WIRE:=1
-ifdef SPI3WIRE
-ICARUS += -DSPI3WIRE=1
-endif
 DUT:=darksocv
 include cosim.mk
 COSIM_SRC := $(RTLS)
@@ -75,8 +69,7 @@ endif
 endif
 endif
 
-.PRECIOUS: $(VCDS)	# Do not delete the trace file if simulation is aborted
-.PHONY: $(VCDS)		# Always run the simulation
+.PHONY: all modelsim clean
 
 ifdef HARVARD
 	SRCS = ../src/darksocv.rom.mem ../src/darksocv.ram.mem
@@ -86,27 +79,12 @@ endif
 
 DEPS = $(SRCS) $(RTLS) $(INCS)
 
-all: $(VCDS) $(COSIM_TARGET)
+all: modelsim $(COSIM_TARGET)
 	@echo simulation ok.
 
+modelsim: $(DEPS) $(MODELSIM_DO)
+	$(VSIM) -c -do "do $(MODELSIM_DO); quit -f"
+
 clean:
-	-rm -f $(VCDS) $(XSIM) $(TRCE) $(GUI_VCD_FILE) imgui.ini
-	-rm -rf tmp_gui
-
-$(VCDS): $(XSIM)
-	echo "VCDS=$(VCDS): XSIM=$(XSIM)"
-	@echo finish |                                          \
-	awk '/^`define __TRACE__/{ exit(-1) }' ../rtl/config.vh \
-	&& ./$(XSIM)                                            \
-	|| ./$(XSIM) |                                          \
-	    awk '{  if($$0~/trace:/) {                          \
-	        print > "$(TRCE)";                              \
-	        if($$0~/40000005:/) {                           \
-	            split($$NF,A,":");                          \
-	            VAL=("0x"A[2])+0;                           \
-	            if(VAL>65536) VAL=VAL/256;                  \
-	            printf("%c",VAL/256); } }                   \
-	        else print }'                                   
-
-$(XSIM): $(DEPS)
-	$(ICARUS) -I ../rtl -o $(XSIM) $(RTLS)
+	-rm -f darksocv darksocv.vcd darksocv.txt $(GUI_VCD_FILE) imgui.ini
+	-rm -rf tmp_gui ../build/modelsim
