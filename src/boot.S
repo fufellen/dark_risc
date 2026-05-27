@@ -58,8 +58,8 @@ _uart_boot:
     
     /* check simulation, skip uart boot */
 
-    la  a5,0x40000000
-    lb  a0,0(a5)
+    la  a5,0x40000000 # DarkIO base address адрес начала блока ввода-вывода
+    lb  a0,0(a5) # чтение байта из регистра 0 блока ввода-вывода
     beq a0,x0,_normal_boot
 
 /*
@@ -70,6 +70,7 @@ _uart_boot:
     - otherwise, go to normal boot
 */
 
+    # отправить 'u' в uart
     li  a0,'u'
     call _uart_putchar
 
@@ -198,13 +199,13 @@ _uart_putchar:
 
     _uart_putchar_busy:
 
-        lb      t0,4(a5)
+        lb      t0,4(a5)       # read uart.stat
         not     t0,t0
         andi    t0,t0,1
         beq     t0,x0,_uart_putchar_busy
 
-    sb a0,5(a5)
-    li t0,'\n'
+    sb a0,5(a5) # store byte - FIFO/data register
+    li t0,'\n' # перенос строки в байт
 
     bne a0,t0,_uart_putchar_exit
 
