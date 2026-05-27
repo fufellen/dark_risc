@@ -7,7 +7,8 @@ Opensource RISC-V implemented from scratch in one night!
 
 ## Quick Start!
 
-Case you already have the Icarus Verilog installed, just clone the code and type make!
+Case you already have the RISC-V toolchain and simulator installed, just clone
+the code and type make!
 
     git clone git@github.com:darklife/darkriscv.git
     cd darkriscv
@@ -15,13 +16,76 @@ Case you already have the Icarus Verilog installed, just clone the code and type
 
 And it will run the DarkRISCV with the default firmware, which will print
 lots of fun messages from the core itself, dump some pipeline information
-and generate a VCD file!
+and run the RTL simulation.
 
-The VCD file can be checked with GTKWave:
+This local Windows setup uses ModelSim by default. The waveform database is
+written under `build/modelsim/darksimv/run`.
 
-    gtkwave sim/darksocv.vcd
+## Windows Setup (MSYS2 + ModelSim)
 
-So, you can add the signals from each module and explore the waveforms! :)
+These are the exact steps used to install the build dependencies on Windows.
+Run them from PowerShell.
+
+Install MSYS2:
+
+```powershell
+winget install --id MSYS2.MSYS2 -e --accept-package-agreements --accept-source-agreements --silent
+```
+
+Update MSYS2. Running the update twice is normal: the first run may update
+`pacman` itself and ask for a new shell.
+
+```powershell
+& C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+& C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+```
+
+Install Make, Unix command-line tools used by the Makefiles, and the RISC-V
+bare-metal toolchain:
+
+```powershell
+& C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed make gawk diffutils coreutils util-linux mingw-w64-ucrt-x86_64-riscv32-unknown-elf-gcc mingw-w64-ucrt-x86_64-riscv32-unknown-elf-binutils mingw-w64-ucrt-x86_64-riscv32-unknown-elf-newlib"
+```
+
+Add MSYS2 and ModelSim to the user `PATH`. Adjust the ModelSim path if it is
+installed somewhere else.
+
+```powershell
+$prepend = @(
+    'C:\msys64\usr\bin',
+    'C:\msys64\ucrt64\bin',
+    'C:\intelFPGA\18.1\modelsim_ase\win32aloem'
+)
+
+$current = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
+$newPath = $prepend + ($current | Where-Object { $prepend -notcontains $_ })
+[Environment]::SetEnvironmentVariable('Path', ($newPath -join ';'), 'User')
+```
+
+Restart PowerShell or VS Code after changing `PATH`, then check the tools:
+
+```powershell
+make --version
+riscv32-unknown-elf-gcc --version
+vsim -version
+```
+
+The project is configured for this MSYS2 toolchain in `src/config.mk`:
+
+```make
+CROSS  = riscv32-unknown-elf
+CCPATH = /ucrt64/bin
+```
+
+Build the firmware and run the ModelSim simulation:
+
+```powershell
+make -C src clean
+make
+```
+
+A successful run prints `Welcome to DarkRISCV!` and ends with `Errors: 0` in
+the ModelSim transcript.
 
 ## Table of Contents
 
@@ -210,7 +274,7 @@ following organization:
 - [Makefile](Makefile): the show start here!
 - [src](src): the source code for the test firmware (boot.c, main.c etc in C language)
 - [rtl](rtl): the source code for the *DarkRISCV* core and the support logic (Verilog)
-- [sim](sim): the source code for the simulation to test the rtl files (currently via icarus)
+- [sim](sim): the source code for the simulation to test the rtl files (currently via ModelSim)
 - [boards](boards): support and examples for different boards (currently via Xilinx ISE)
 - [tmp](tmp): empty, but the ISE will create lots of files here)
 
@@ -303,16 +367,14 @@ cd darkriscv
 make (use sudo if required)
 
 
-The top level *Makefile* is responsible to build everything, but it must 
-be edited first, in a way that the user at least must select the compiler 
-path and the target board.
+The top level *Makefile* is responsible to build everything. Depending on the
+host system, the compiler path and simulator command may need to be adjusted.
 
-By default, the top level *Makefile* uses:
+On this checkout, the Windows/MSYS2 defaults are:
 
-	CROSS = riscv32-embedded-elf
-	CCPATH = /usr/local/share/gcc-$(CROSS)/bin/
-	ICARUS = /usr/local/bin/iverilog
-	BOARD  = avnet_microboard_lx9
+	CROSS = riscv32-unknown-elf
+	CCPATH = /ucrt64/bin
+	VSIM = vsim
 	
 Just update the configuration according to your system configuration, type
 *make* and hope everything is in the correct location!  You probably will
@@ -320,7 +382,7 @@ need fix some paths and set some others in the PATH environment variable,
 but it will eventually work.
 
 And, when everything is correctly configured, the result will be something
-like this:
+like this historical Linux/RV32E build log:
 
 ```$ 
 # make

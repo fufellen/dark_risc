@@ -34,13 +34,17 @@ ifndef HOST_CC
 endif
 
 ifndef CROSS
-    export CROSS = riscv32-embedded-elf
+    # MSYS2 UCRT64 package: mingw-w64-ucrt-x86_64-riscv32-unknown-elf-gcc
+    export CROSS = riscv32-unknown-elf
+    #export CROSS = riscv32-embedded-elf
     #export CROSS = riscv64-unknown-elf
-    #export CROSS = riscv32-unknown-elf
     #export CROSS = riscv-elf
     #export CROSS = riscv32-unknown-elf
+endif
 
-    export CCPATH = /usr/local/share/gcc-$(CROSS)/bin
+ifndef CCPATH
+    export CCPATH = /ucrt64/bin
+    #export CCPATH = /usr/local/share/gcc-$(CROSS)/bin
     #export CCPATH = /usr/local/bin
     #export CCPATH = /opt/riscv/bin
     #export CCPATH = /usr/local/share/toolchain-$(CROSS)/bin

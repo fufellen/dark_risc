@@ -2,10 +2,38 @@
 
 This directory provides support for simulation tools.
 
-## Icarus Verilog / GTKWave
-The main simulation tool is the opensource tools `Icarus Verilog` and `GTKWave`.\
-Alternatively, it is possible to use proprietary simulation tools, as
-the Xilinx ISIM and ModelSIM.
+## ModelSim
+
+The default simulation flow in this checkout uses ModelSim through
+`sim/darksimv_modelsim.do`.
+
+From the repository root:
+
+```shell
+make
+```
+
+Or from this directory:
+
+```shell
+make -C ../src all
+make
+```
+
+The Makefile runs:
+
+```shell
+vsim -c -do "do darksimv_modelsim.do; quit -f"
+```
+
+The simulation work directory and waveform database are created under
+`../build/modelsim/darksimv/run`.
+
+If ModelSim is not in `PATH`, pass it explicitly:
+
+```shell
+make VSIM=/path/to/vsim
+```
 
 TODO: simulation models for external peripherals, such as the DarkUART.
 
