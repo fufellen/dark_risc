@@ -65,10 +65,29 @@ module darksimv;
     end
 
     wire TX;
-    wire RX = 1;
+    reg RX = 1;
     wire [31:0] LED;
     wire [31:0] OPORT;
     wire [3:0] DEBUG;
+
+    task uart_rx_byte(input [7:0] data);
+        integer bit_idx;
+    begin
+        RX <= 1;
+        repeat(`__BAUD__) @(posedge CLK);
+        RX <= 0;
+        repeat(`__BAUD__) @(posedge CLK);
+
+        for(bit_idx=0; bit_idx<8; bit_idx=bit_idx+1)
+        begin
+            RX <= data[bit_idx];
+            repeat(`__BAUD__) @(posedge CLK);
+        end
+
+        RX <= 1;
+        repeat(`__BAUD__) @(posedge CLK);
+    end
+    endtask
 
 `ifdef DARKETH_MMIO
     reg        ETH_RX_BYTE_VALID = 0;
@@ -110,7 +129,7 @@ module darksimv;
     initial
     begin
         wait(RES == 0);
-        #1_000_000;
+        #20_000_000;
         $display("FAIL darketh lwip sim timeout ready=%b available=%b",
                  ETH_RX_READY_FOR_FRAME, ETH_RX_FRAME_AVAILABLE);
         $fatal;
@@ -123,6 +142,57 @@ module darksimv;
         #20_000;
 `ifdef DARKETH_LWIP_FRAME
         #100_000;
+        $display("darketh sim uart cfg mac/ip/port");
+        uart_rx_byte("m");
+        uart_rx_byte("a");
+        uart_rx_byte("c");
+        uart_rx_byte(" ");
+        uart_rx_byte("0");
+        uart_rx_byte("2");
+        uart_rx_byte("2");
+        uart_rx_byte("0");
+        uart_rx_byte("2");
+        uart_rx_byte("0");
+        uart_rx_byte("2");
+        uart_rx_byte("0");
+        uart_rx_byte("2");
+        uart_rx_byte("0");
+        uart_rx_byte("0");
+        uart_rx_byte("2");
+        uart_rx_byte(8'h0a);
+        #400_000;
+
+        uart_rx_byte("i");
+        uart_rx_byte("p");
+        uart_rx_byte(" ");
+        uart_rx_byte("1");
+        uart_rx_byte("9");
+        uart_rx_byte("2");
+        uart_rx_byte(".");
+        uart_rx_byte("1");
+        uart_rx_byte("6");
+        uart_rx_byte("8");
+        uart_rx_byte(".");
+        uart_rx_byte("2");
+        uart_rx_byte("0");
+        uart_rx_byte(".");
+        uart_rx_byte("2");
+        uart_rx_byte("1");
+        uart_rx_byte(8'h0a);
+        #400_000;
+
+        uart_rx_byte("p");
+        uart_rx_byte("o");
+        uart_rx_byte("r");
+        uart_rx_byte("t");
+        uart_rx_byte(" ");
+        uart_rx_byte("5");
+        uart_rx_byte("0");
+        uart_rx_byte("0");
+        uart_rx_byte("6");
+        uart_rx_byte(8'h0a);
+        #400_000;
+
         $display("darketh sim rx arp request");
         eth_byte(8'hff);
         eth_byte(8'hff);
@@ -165,7 +235,7 @@ module darksimv;
         eth_byte(8'hc0);
         eth_byte(8'ha8);
         eth_byte(8'h14);
-        eth_byte(8'h14);
+        eth_byte(8'h15);
         eth_commit_frame();
         wait(ETH_RX_FRAME_AVAILABLE);
         wait(ETH_RX_READY_FOR_FRAME);
@@ -178,7 +248,7 @@ module darksimv;
         eth_byte(8'h20);
         eth_byte(8'h20);
         eth_byte(8'h20);
-        eth_byte(8'h01);
+        eth_byte(8'h02);
         eth_byte(8'h02);
         eth_byte(8'haa);
         eth_byte(8'hbb);
@@ -206,11 +276,11 @@ module darksimv;
         eth_byte(8'hc0);
         eth_byte(8'ha8);
         eth_byte(8'h14);
-        eth_byte(8'h14);
+        eth_byte(8'h15);
         eth_byte(8'h0f);
         eth_byte(8'ha0);
         eth_byte(8'h13);
-        eth_byte(8'h8d);
+        eth_byte(8'h8e);
         eth_byte(8'h00);
         eth_byte(8'h0c);
         eth_byte(8'h00);

@@ -30,6 +30,7 @@
 #define ETH_TX_CTRL_CLEAR_FLAGS 0x00000004u
 
 #define LWIPDEMO_MAX_FRAME      1518u
+#define LWIPDEMO_UART_LINE_MAX  48u
 
 struct DARKETH {
     unsigned status;
@@ -44,7 +45,11 @@ struct DARKETH {
 
 static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
 static struct netif fpga_netif;
+static struct udp_pcb *udp_listener;
 static volatile unsigned udp_seen;
+static unsigned netif_configured;
+static char uart_line[LWIPDEMO_UART_LINE_MAX];
+static unsigned uart_line_len;
 
 struct LWIPDEMO_CONFIG {
     unsigned char mac[6];
@@ -174,6 +179,11 @@ static void udp_recv_cb(void *arg, struct udp_pcb *upcb, struct pbuf *p,
 
 static err_t udp_server_init(void)
 {
+    if (udp_listener != 0) {
+        udp_remove(udp_listener);
+        udp_listener = 0;
+    }
+
     struct udp_pcb *pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
     if (pcb == 0) {
         return ERR_MEM;
@@ -186,7 +196,260 @@ static err_t udp_server_init(void)
     }
 
     udp_recv(pcb, udp_recv_cb, 0);
+    udp_listener = pcb;
     return ERR_OK;
+}
+
+static void apply_netif_config(void)
+{
+    ip4_addr_t ipaddr;
+    ip4_addr_t netmask;
+    ip4_addr_t gw;
+
+    for (unsigned i = 0; i < 6; i++) {
+        fpga_netif.hwaddr[i] = runtime_config.mac[i];
+    }
+
+    ip4_from_config(&ipaddr, runtime_config.ip);
+    ip4_from_config(&netmask, runtime_config.netmask);
+    ip4_from_config(&gw, runtime_config.gateway);
+    netif_set_addr(&fpga_netif, &ipaddr, &netmask, &gw);
+}
+
+static err_t apply_runtime_config(void)
+{
+    if (!netif_configured) {
+        return ERR_OK;
+    }
+
+    apply_netif_config();
+    err_t err = udp_server_init();
+    printf("lwipdemo cfg apply=%d port=%d\n", err, runtime_config.udp_port);
+    print_config();
+    return err;
+}
+
+static int is_space(char c)
+{
+    return c == ' ' || c == '\t';
+}
+
+static char *skip_spaces(char *text)
+{
+    while (is_space(*text)) {
+        text++;
+    }
+    return text;
+}
+
+static int is_line_end(char c)
+{
+    return c == 0 || c == ' ' || c == '\t';
+}
+
+static int command_is(char *line, const char *cmd)
+{
+    while (*cmd && *line == *cmd) {
+        line++;
+        cmd++;
+    }
+
+    return *cmd == 0 && is_line_end(*line);
+}
+
+static char *command_arg(char *line)
+{
+    while (*line && !is_space(*line)) {
+        line++;
+    }
+    return skip_spaces(line);
+}
+
+static int parse_dec(char **cursor, unsigned *value)
+{
+    char *p = skip_spaces(*cursor);
+    unsigned parsed = 0;
+    unsigned digits = 0;
+
+    while (*p >= '0' && *p <= '9') {
+        parsed = (parsed * 10u) + (unsigned)(*p - '0');
+        digits++;
+        p++;
+    }
+
+    if (!digits) {
+        return 0;
+    }
+
+    *value = parsed;
+    *cursor = p;
+    return 1;
+}
+
+static int parse_ipv4(char *text, unsigned char out[4])
+{
+    char *p = text;
+
+    for (unsigned i = 0; i < 4; i++) {
+        unsigned octet = 0;
+        if (!parse_dec(&p, &octet) || octet > 255u) {
+            return 0;
+        }
+        out[i] = (unsigned char)octet;
+
+        if (i != 3) {
+            if (*p != '.') {
+                return 0;
+            }
+            p++;
+        }
+    }
+
+    p = skip_spaces(p);
+    return *p == 0;
+}
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return 10 + c - 'a';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return 10 + c - 'A';
+    }
+    return -1;
+}
+
+static int parse_mac(char *text, unsigned char out[6])
+{
+    char *p = skip_spaces(text);
+
+    for (unsigned i = 0; i < 6; i++) {
+        int high = hex_nibble(*p++);
+        int low = hex_nibble(*p++);
+
+        if (high < 0 || low < 0) {
+            return 0;
+        }
+
+        out[i] = (unsigned char)((high << 4) | low);
+
+        if (i != 5 && (*p == ':' || *p == '-')) {
+            p++;
+        }
+    }
+
+    p = skip_spaces(p);
+    return *p == 0;
+}
+
+static void copy_bytes(unsigned char *dst, const unsigned char *src, unsigned len)
+{
+    for (unsigned i = 0; i < len; i++) {
+        dst[i] = src[i];
+    }
+}
+
+static void handle_uart_command(char *line)
+{
+    line = skip_spaces(line);
+    char *arg = command_arg(line);
+    unsigned char parsed_bytes[6];
+    unsigned parsed_port = 0;
+
+    if (*line == 0) {
+        return;
+    }
+
+    if (command_is(line, "show") || command_is(line, "cfg")) {
+        print_config();
+        return;
+    }
+
+    if (command_is(line, "apply")) {
+        (void)apply_runtime_config();
+        return;
+    }
+
+    if (command_is(line, "mac")) {
+        if (!parse_mac(arg, parsed_bytes)) {
+            printf("lwipdemo cfg bad mac\n");
+            return;
+        }
+        copy_bytes(runtime_config.mac, parsed_bytes, 6);
+        (void)apply_runtime_config();
+        return;
+    }
+
+    if (command_is(line, "ip")) {
+        if (!parse_ipv4(arg, parsed_bytes)) {
+            printf("lwipdemo cfg bad ip\n");
+            return;
+        }
+        copy_bytes(runtime_config.ip, parsed_bytes, 4);
+        (void)apply_runtime_config();
+        return;
+    }
+
+    if (command_is(line, "mask") || command_is(line, "netmask")) {
+        if (!parse_ipv4(arg, parsed_bytes)) {
+            printf("lwipdemo cfg bad mask\n");
+            return;
+        }
+        copy_bytes(runtime_config.netmask, parsed_bytes, 4);
+        (void)apply_runtime_config();
+        return;
+    }
+
+    if (command_is(line, "gw") || command_is(line, "gateway")) {
+        if (!parse_ipv4(arg, parsed_bytes)) {
+            printf("lwipdemo cfg bad gw\n");
+            return;
+        }
+        copy_bytes(runtime_config.gateway, parsed_bytes, 4);
+        (void)apply_runtime_config();
+        return;
+    }
+
+    if (command_is(line, "port")) {
+        if (!parse_dec(&arg, &parsed_port) || parsed_port > 65535u ||
+            *skip_spaces(arg) != 0) {
+            printf("lwipdemo cfg bad port\n");
+            return;
+        }
+        runtime_config.udp_port = parsed_port;
+        (void)apply_runtime_config();
+        return;
+    }
+
+    printf("lwipdemo cfg unknown\n");
+}
+
+static void poll_uart_config(void)
+{
+    while (io->uart.stat & 2) {
+        char c = io->uart.fifo;
+
+        if (c == '\r' || c == '\n') {
+            if (uart_line_len != 0) {
+                uart_line[uart_line_len] = 0;
+                handle_uart_command(uart_line);
+                uart_line_len = 0;
+            }
+        } else if (c == '\b' || c == 127) {
+            if (uart_line_len != 0) {
+                uart_line_len--;
+            }
+        } else if (uart_line_len < (LWIPDEMO_UART_LINE_MAX - 1u)) {
+            uart_line[uart_line_len++] = c;
+        } else {
+            uart_line_len = 0;
+            printf("lwipdemo cfg line too long\n");
+        }
+    }
 }
 
 static void drain_rx_frame(unsigned len)
@@ -249,7 +512,9 @@ int main(void)
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
-    unsigned timeout = 1000000;
+    unsigned timeout = 50000000;
+    unsigned ok_reported = 0;
+    unsigned timeout_reported = 0;
 
     printf("lwipdemo start\n");
 
@@ -266,6 +531,7 @@ int main(void)
         printf("lwipdemo netif fail\n>");
         return 1;
     }
+    netif_configured = 1;
 
     netif_set_default(&fpga_netif);
     netif_set_up(&fpga_netif);
@@ -278,22 +544,27 @@ int main(void)
         return 1;
     }
 
-    while (!udp_seen && timeout) {
+    while (1) {
+        poll_uart_config();
         poll_rx_frame();
         sys_check_timeouts();
-        timeout--;
-    }
 
-    if (!udp_seen) {
-        printf("lwipdemo timeout status=%x\n>", eth->status);
-        return 1;
-    }
+        if (udp_seen && !ok_reported) {
+            if (!(eth->status & ETH_STATUS_RX_READY)) {
+                printf("lwipdemo rx not ready=%x\n>", eth->status);
+            } else {
+                printf("lwipdemo ok\n>");
+            }
+            ok_reported = 1;
+        }
 
-    if (!(eth->status & ETH_STATUS_RX_READY)) {
-        printf("lwipdemo rx not ready=%x\n>", eth->status);
-        return 1;
-    }
+        if (!udp_seen && timeout != 0) {
+            timeout--;
+        }
 
-    printf("lwipdemo ok\n>");
-    return 0;
+        if (!udp_seen && timeout == 0 && !timeout_reported) {
+            printf("lwipdemo timeout status=%x\n>", eth->status);
+            timeout_reported = 1;
+        }
+    }
 }
