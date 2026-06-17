@@ -40,6 +40,7 @@ RTLS =  darksimv.v                      \
         ../rtl/darkpll.v                \
         ../rtl/darkram.v                \
         ../rtl/darkio.v                 \
+        ../rtl/darketh_mmio.sv          \
         ../rtl/darkcache.v              \
         ../rtl/darkmac.v                \
         ../rtl/lib/sdram/mt48lc16m16a2_ctrl.v

@@ -55,12 +55,13 @@ set rtl_files [list \
     [file join $project_dir "rtl" "darkpll.v"] \
     [file join $project_dir "rtl" "darkram.v"] \
     [file join $project_dir "rtl" "darkio.v"] \
+    [file join $project_dir "rtl" "darketh_mmio.sv"] \
     [file join $project_dir "rtl" "darkcache.v"] \
     [file join $project_dir "rtl" "darkmac.v"] \
     [file join $project_dir "rtl" "lib" "sdram" "mt48lc16m16a2_ctrl.v"] \
 ]
 
-set vlog_cmd [list vlog -sv $incdir]
+set vlog_cmd [list vlog -sv $incdir +define+DARKETH_MMIO]
 foreach rtl_file $rtl_files {
     lappend vlog_cmd $rtl_file
 }

@@ -66,6 +66,44 @@ module darksimv;
 
     wire TX;
     wire RX = 1;
+    wire [31:0] LED;
+    wire [31:0] OPORT;
+    wire [3:0] DEBUG;
+
+`ifdef DARKETH_MMIO
+    reg        ETH_RX_BYTE_VALID = 0;
+    reg  [7:0] ETH_RX_BYTE = 0;
+    reg        ETH_RX_FRAME_VALID = 0;
+    reg        ETH_RX_FRAME_DROP = 0;
+    wire       ETH_RX_READY_FOR_FRAME;
+    wire       ETH_RX_FRAME_AVAILABLE;
+
+    task eth_byte(input [7:0] data);
+    begin
+        @(posedge CLK);
+        ETH_RX_BYTE <= data;
+        ETH_RX_BYTE_VALID <= 1;
+        @(posedge CLK);
+        ETH_RX_BYTE_VALID <= 0;
+    end
+    endtask
+
+    initial
+    begin
+        wait(RES == 0);
+        #20_000;
+        eth_byte(8'hde);
+        eth_byte(8'had);
+        eth_byte(8'hbe);
+        eth_byte(8'hef);
+        eth_byte(8'h08);
+        eth_byte(8'h00);
+        @(posedge CLK);
+        ETH_RX_FRAME_VALID <= 1;
+        @(posedge CLK);
+        ETH_RX_FRAME_VALID <= 0;
+    end
+`endif
 
 `ifdef __SDRAM__
 
@@ -92,6 +130,14 @@ module darksimv;
     (
         .XCLK(CLK),
         .XRES(|RES),
+`ifdef DARKETH_MMIO
+        .ETH_RX_BYTE_VALID(ETH_RX_BYTE_VALID),
+        .ETH_RX_BYTE(ETH_RX_BYTE),
+        .ETH_RX_FRAME_VALID(ETH_RX_FRAME_VALID),
+        .ETH_RX_FRAME_DROP(ETH_RX_FRAME_DROP),
+        .ETH_RX_READY_FOR_FRAME(ETH_RX_READY_FOR_FRAME),
+        .ETH_RX_FRAME_AVAILABLE(ETH_RX_FRAME_AVAILABLE),
+`endif
 `ifdef __SDRAM__
         .S_CLK(S_CLK),
         .S_NWE(S_NWE),
@@ -100,7 +146,10 @@ module darksimv;
 `endif
         .IPORT(0),
         .UART_RXD(RX),
-        .UART_TXD(TX)
+        .UART_TXD(TX),
+        .LED(LED),
+        .OPORT(OPORT),
+        .DEBUG(DEBUG)
     );
 
 endmodule

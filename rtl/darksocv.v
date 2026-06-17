@@ -41,6 +41,14 @@ module darksocv
 
     input        UART_RXD,  // UART receive line
     output       UART_TXD,  // UART transmit line
+`ifdef DARKETH_MMIO
+    input        ETH_RX_BYTE_VALID,
+    input  [7:0] ETH_RX_BYTE,
+    input        ETH_RX_FRAME_VALID,
+    input        ETH_RX_FRAME_DROP,
+    output       ETH_RX_READY_FOR_FRAME,
+    output       ETH_RX_FRAME_AVAILABLE,
+`endif
 `ifdef SPI
     output       SPI_CSN,   // SPI CSN output (active LOW)
     output       SPI_SCK,   // SPI clock output
@@ -324,6 +332,37 @@ module darksocv
 
 `else
 
+`ifdef DARKETH_MMIO
+
+    darketh_mmio eth0
+    (
+        .CLK                (CLK),
+        .RES                (RES),
+
+        .XDREQ              (XDREQMUX[2]),
+        .XRD                (XRD),
+        .XWR                (XWR),
+        .XBE                (XBE),
+        .XADDR              (XADDR),
+        .XATAI              (XATAO),
+        .XATAO              (XATAIMUX[2]),
+        .XDACK              (XDACKMUX[2]),
+
+        .rx_byte_valid      (ETH_RX_BYTE_VALID),
+        .rx_byte            (ETH_RX_BYTE),
+        .rx_frame_valid     (ETH_RX_FRAME_VALID),
+        .rx_frame_drop      (ETH_RX_FRAME_DROP),
+
+        .rx_ready_for_frame (ETH_RX_READY_FOR_FRAME),
+        .rx_frame_available (ETH_RX_FRAME_AVAILABLE),
+        .rx_overflow        (),
+        .rx_dropped         (),
+        .rx_busy            (),
+        .rx_irq             ()
+    );
+
+`else
+
     reg [3:0] DTACK2 = 0;
     reg       PRINT2 = 1;
 
@@ -341,6 +380,8 @@ module darksocv
 
     assign XATAIMUX[2] = 32'hdeadbeef;
     assign XDACKMUX[2] = DTACK2==1;
+
+`endif
 
 `endif
 
