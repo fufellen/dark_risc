@@ -122,6 +122,7 @@ module darksimv;
         wait(RES == 0);
         #20_000;
 `ifdef DARKETH_LWIP_FRAME
+        #100_000;
         $display("darketh sim rx arp request");
         eth_byte(8'hff);
         eth_byte(8'hff);

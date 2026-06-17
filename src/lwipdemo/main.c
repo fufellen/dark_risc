@@ -29,7 +29,6 @@
 #define ETH_TX_CTRL_ABORT       0x00000002u
 #define ETH_TX_CTRL_CLEAR_FLAGS 0x00000004u
 
-#define LWIPDEMO_UDP_PORT       5005u
 #define LWIPDEMO_MAX_FRAME      1518u
 
 struct DARKETH {
@@ -47,9 +46,43 @@ static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
 static struct netif fpga_netif;
 static volatile unsigned udp_seen;
 
+struct LWIPDEMO_CONFIG {
+    unsigned char mac[6];
+    unsigned char ip[4];
+    unsigned char netmask[4];
+    unsigned char gateway[4];
+    unsigned udp_port;
+};
+
+static struct LWIPDEMO_CONFIG runtime_config = {
+    .mac = {0x02, 0x20, 0x20, 0x20, 0x20, 0x01},
+    .ip = {192, 168, 20, 20},
+    .netmask = {255, 255, 255, 0},
+    .gateway = {192, 168, 20, 1},
+    .udp_port = 5005u,
+};
+
 u32_t sys_now(void)
 {
     return io->timeus / 1000u;
+}
+
+static void ip4_from_config(ip4_addr_t *addr, const unsigned char octets[4])
+{
+    IP4_ADDR(addr, octets[0], octets[1], octets[2], octets[3]);
+}
+
+static void print_config(void)
+{
+    printf("lwipdemo cfg mac=");
+    for (unsigned i = 0; i < 6; i++) {
+        printf("%x", runtime_config.mac[i]);
+    }
+
+    printf(" ip=%d.%d.%d.%d port=%d\n",
+           runtime_config.ip[0], runtime_config.ip[1],
+           runtime_config.ip[2], runtime_config.ip[3],
+           runtime_config.udp_port);
 }
 
 static err_t darketh_linkoutput(struct netif *netif, struct pbuf *p)
@@ -104,12 +137,9 @@ static err_t darketh_netif_init(struct netif *netif)
     netif->output = etharp_output;
     netif->linkoutput = darketh_linkoutput;
     netif->hwaddr_len = ETH_HWADDR_LEN;
-    netif->hwaddr[0] = 0x02;
-    netif->hwaddr[1] = 0x20;
-    netif->hwaddr[2] = 0x20;
-    netif->hwaddr[3] = 0x20;
-    netif->hwaddr[4] = 0x20;
-    netif->hwaddr[5] = 0x01;
+    for (unsigned i = 0; i < 6; i++) {
+        netif->hwaddr[i] = runtime_config.mac[i];
+    }
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
 #ifdef NETIF_FLAG_ETHERNET
@@ -149,7 +179,7 @@ static err_t udp_server_init(void)
         return ERR_MEM;
     }
 
-    err_t err = udp_bind(pcb, IP_ANY_TYPE, LWIPDEMO_UDP_PORT);
+    err_t err = udp_bind(pcb, IP_ANY_TYPE, runtime_config.udp_port);
     if (err != ERR_OK) {
         udp_remove(pcb);
         return err;
@@ -225,9 +255,11 @@ int main(void)
 
     lwip_init();
 
-    IP4_ADDR(&ipaddr, 192, 168, 20, 20);
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 192, 168, 20, 1);
+    print_config();
+
+    ip4_from_config(&ipaddr, runtime_config.ip);
+    ip4_from_config(&netmask, runtime_config.netmask);
+    ip4_from_config(&gw, runtime_config.gateway);
 
     if (netif_add(&fpga_netif, &ipaddr, &netmask, &gw, 0,
                   darketh_netif_init, ethernet_input) == 0) {
@@ -240,7 +272,7 @@ int main(void)
     netif_set_link_up(&fpga_netif);
 
     err_t err = udp_server_init();
-    printf("lwipdemo udp bind=%d port=%d\n", err, LWIPDEMO_UDP_PORT);
+    printf("lwipdemo udp bind=%d port=%d\n", err, runtime_config.udp_port);
     if (err != ERR_OK) {
         printf(">");
         return 1;
