@@ -29,6 +29,10 @@
 #define ETH_TX_CTRL_ABORT       0x00000002u
 #define ETH_TX_CTRL_CLEAR_FLAGS 0x00000004u
 
+#define ETH_CFG_MAC_FILTER_ENABLE 0x00000001u
+#define ETH_CFG_ACCEPT_BROADCAST  0x00000002u
+#define ETH_CFG_ACCEPT_MULTICAST  0x00000004u
+
 #define LWIPDEMO_MAX_FRAME      1518u
 #define LWIPDEMO_UART_LINE_MAX  48u
 
@@ -41,6 +45,9 @@ struct DARKETH {
     unsigned tx_len;
     unsigned tx_data;
     unsigned tx_ctrl;
+    unsigned cfg_mac_lo;
+    unsigned cfg_mac_hi;
+    unsigned cfg_flags;
 };
 
 static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
@@ -88,6 +95,22 @@ static void print_config(void)
            runtime_config.ip[0], runtime_config.ip[1],
            runtime_config.ip[2], runtime_config.ip[3],
            runtime_config.udp_port);
+}
+
+static void darketh_apply_filter_config(void)
+{
+    unsigned mac_hi = ((unsigned)runtime_config.mac[0] << 8) |
+                      ((unsigned)runtime_config.mac[1]);
+    unsigned mac_lo = ((unsigned)runtime_config.mac[2] << 24) |
+                      ((unsigned)runtime_config.mac[3] << 16) |
+                      ((unsigned)runtime_config.mac[4] << 8) |
+                      ((unsigned)runtime_config.mac[5]);
+
+    eth->cfg_mac_lo = mac_lo;
+    eth->cfg_mac_hi = mac_hi;
+    eth->cfg_flags = ETH_CFG_MAC_FILTER_ENABLE |
+                     ETH_CFG_ACCEPT_BROADCAST |
+                     ETH_CFG_ACCEPT_MULTICAST;
 }
 
 static err_t darketh_linkoutput(struct netif *netif, struct pbuf *p)
@@ -214,6 +237,7 @@ static void apply_netif_config(void)
     ip4_from_config(&netmask, runtime_config.netmask);
     ip4_from_config(&gw, runtime_config.gateway);
     netif_set_addr(&fpga_netif, &ipaddr, &netmask, &gw);
+    darketh_apply_filter_config();
 }
 
 static err_t apply_runtime_config(void)
@@ -532,6 +556,7 @@ int main(void)
         return 1;
     }
     netif_configured = 1;
+    apply_netif_config();
 
     netif_set_default(&fpga_netif);
     netif_set_up(&fpga_netif);

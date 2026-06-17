@@ -11,6 +11,9 @@ module darketh_mmio_tb;
     localparam int unsigned REG_TX_LEN = 32'h14;
     localparam int unsigned REG_TX_DATA = 32'h18;
     localparam int unsigned REG_TX_CTRL = 32'h1c;
+    localparam int unsigned REG_CFG_MAC_LO = 32'h20;
+    localparam int unsigned REG_CFG_MAC_HI = 32'h24;
+    localparam int unsigned REG_CFG_FLAGS = 32'h28;
 
     localparam logic [31:0] STATUS_RX_AVAILABLE = 32'h0000_0001;
     localparam logic [31:0] STATUS_RX_OVERFLOW = 32'h0000_0002;
@@ -56,6 +59,10 @@ module darketh_mmio_tb;
     logic tx_busy;
     logic tx_done;
     logic tx_overflow;
+    logic cfg_mac_filter_enable;
+    logic [47:0] cfg_local_mac;
+    logic cfg_accept_broadcast;
+    logic cfg_accept_multicast;
 
     logic [7:0] sample_frame [0:5];
     logic [7:0] tx_seen [0:5];
@@ -103,7 +110,11 @@ module darketh_mmio_tb;
         .tx_ready_for_frame(tx_ready_for_frame),
         .tx_busy(tx_busy),
         .tx_done(tx_done),
-        .tx_overflow(tx_overflow)
+        .tx_overflow(tx_overflow),
+        .cfg_mac_filter_enable(cfg_mac_filter_enable),
+        .cfg_local_mac(cfg_local_mac),
+        .cfg_accept_broadcast(cfg_accept_broadcast),
+        .cfg_accept_multicast(cfg_accept_multicast)
     );
 
     task automatic mmio_read(input logic [31:0] addr, output logic [31:0] data);
@@ -192,6 +203,29 @@ module darketh_mmio_tb;
 
         mmio_read(REG_TX_STATUS, data);
         check_equal(data, STATUS_TX_READY, "reset tx status");
+
+        check_equal({31'd0, cfg_mac_filter_enable}, 32'd1, "reset cfg filter enable");
+        check_equal(cfg_local_mac[31:0], 32'h2020_2001, "reset cfg mac lo");
+        check_equal({16'd0, cfg_local_mac[47:32]}, 32'h0000_0220, "reset cfg mac hi");
+        check_equal({29'd0, cfg_accept_multicast, cfg_accept_broadcast, cfg_mac_filter_enable},
+                    32'h0000_0007,
+                    "reset cfg flags");
+
+        mmio_write(REG_CFG_MAC_LO, 32'haabb_ccdd);
+        mmio_write(REG_CFG_MAC_HI, 32'h0000_0220);
+        mmio_write(REG_CFG_FLAGS, 32'h0000_0005);
+
+        mmio_read(REG_CFG_MAC_LO, data);
+        check_equal(data, 32'haabb_ccdd, "cfg mac lo readback");
+        mmio_read(REG_CFG_MAC_HI, data);
+        check_equal(data, 32'h0000_0220, "cfg mac hi readback");
+        mmio_read(REG_CFG_FLAGS, data);
+        check_equal(data, 32'h0000_0005, "cfg flags readback");
+        check_equal(cfg_local_mac[31:0], 32'haabb_ccdd, "cfg mac lo output");
+        check_equal({16'd0, cfg_local_mac[47:32]}, 32'h0000_0220, "cfg mac hi output");
+        check_equal({29'd0, cfg_accept_multicast, cfg_accept_broadcast, cfg_mac_filter_enable},
+                    32'h0000_0005,
+                    "cfg flags output");
 
         foreach (sample_frame[i]) begin
             feed_byte(sample_frame[i]);

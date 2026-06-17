@@ -323,6 +323,11 @@
 //`define XILINX_AC701_A200
 //`define QMTECH_SDRAM_LX16
 
+`ifdef M20K_DEV_BOARD
+    `define BOARD_ID 21
+    `define BOARD_CK 50000000
+`endif
+
 // the following defines are automatically defined:
 
 `ifdef __ICARUS__

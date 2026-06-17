@@ -105,6 +105,10 @@ module darksimv;
     wire       ETH_TX_BUSY;
     wire       ETH_TX_DONE;
     wire       ETH_TX_OVERFLOW;
+    wire       ETH_CFG_MAC_FILTER_ENABLE;
+    wire [47:0] ETH_CFG_LOCAL_MAC;
+    wire       ETH_CFG_ACCEPT_BROADCAST;
+    wire       ETH_CFG_ACCEPT_MULTICAST;
 
     task eth_byte(input [7:0] data);
     begin
@@ -353,6 +357,10 @@ module darksimv;
         .ETH_TX_BUSY(ETH_TX_BUSY),
         .ETH_TX_DONE(ETH_TX_DONE),
         .ETH_TX_OVERFLOW(ETH_TX_OVERFLOW),
+        .ETH_CFG_MAC_FILTER_ENABLE(ETH_CFG_MAC_FILTER_ENABLE),
+        .ETH_CFG_LOCAL_MAC(ETH_CFG_LOCAL_MAC),
+        .ETH_CFG_ACCEPT_BROADCAST(ETH_CFG_ACCEPT_BROADCAST),
+        .ETH_CFG_ACCEPT_MULTICAST(ETH_CFG_ACCEPT_MULTICAST),
 `endif
 `ifdef __SDRAM__
         .S_CLK(S_CLK),

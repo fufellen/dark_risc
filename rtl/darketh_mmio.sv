@@ -9,7 +9,11 @@
 `timescale 1ns / 1ps
 
 module darketh_mmio #(
-    parameter int unsigned MAX_FRAME_BYTES = 2048
+    parameter int unsigned MAX_FRAME_BYTES = 2048,
+    parameter logic [47:0] DEFAULT_LOCAL_MAC = 48'h02_20_20_20_20_01,
+    parameter logic DEFAULT_MAC_FILTER_ENABLE = 1'b1,
+    parameter logic DEFAULT_ACCEPT_BROADCAST = 1'b1,
+    parameter logic DEFAULT_ACCEPT_MULTICAST = 1'b1
 )(
     input  logic        CLK,
     input  logic        RES,
@@ -43,7 +47,12 @@ module darketh_mmio #(
     output logic        tx_ready_for_frame,
     output logic        tx_busy,
     output logic        tx_done,
-    output logic        tx_overflow
+    output logic        tx_overflow,
+
+    output logic        cfg_mac_filter_enable,
+    output logic [47:0] cfg_local_mac,
+    output logic        cfg_accept_broadcast,
+    output logic        cfg_accept_multicast
 );
     localparam int unsigned PTR_WIDTH = $clog2(MAX_FRAME_BYTES + 1);
 
@@ -55,12 +64,18 @@ module darketh_mmio #(
     localparam logic [3:0] REG_TX_LEN = 4'h5;
     localparam logic [3:0] REG_TX_DATA = 4'h6;
     localparam logic [3:0] REG_TX_CTRL = 4'h7;
+    localparam logic [3:0] REG_CFG_MAC_LO = 4'h8;
+    localparam logic [3:0] REG_CFG_MAC_HI = 4'h9;
+    localparam logic [3:0] REG_CFG_FLAGS = 4'ha;
 
     localparam logic [0:0] CTRL_RX_RELEASE = 1'b1;
     localparam logic [1:1] CTRL_RX_CLEAR_FLAGS = 1'b1;
     localparam logic [0:0] CTRL_TX_START = 1'b1;
     localparam logic [1:1] CTRL_TX_ABORT = 1'b1;
     localparam logic [2:2] CTRL_TX_CLEAR_FLAGS = 1'b1;
+    localparam logic [0:0] CFG_MAC_FILTER_ENABLE = 1'b1;
+    localparam logic [1:1] CFG_ACCEPT_BROADCAST = 1'b1;
+    localparam logic [2:2] CFG_ACCEPT_MULTICAST = 1'b1;
 
     logic [7:0] rx_mem [0:MAX_FRAME_BYTES-1];
     logic [7:0] tx_mem [0:MAX_FRAME_BYTES-1];
@@ -113,6 +128,10 @@ module darketh_mmio #(
             tx_config_len <= '0;
             tx_write_len <= '0;
             tx_send_idx <= '0;
+            cfg_mac_filter_enable <= DEFAULT_MAC_FILTER_ENABLE;
+            cfg_local_mac <= DEFAULT_LOCAL_MAC;
+            cfg_accept_broadcast <= DEFAULT_ACCEPT_BROADCAST;
+            cfg_accept_multicast <= DEFAULT_ACCEPT_MULTICAST;
         end else begin
             tx_byte_valid <= 1'b0;
             tx_frame_start <= 1'b0;
@@ -230,6 +249,20 @@ module darketh_mmio #(
                 end
             end
 
+            if (write_start && (reg_addr == REG_CFG_MAC_LO)) begin
+                cfg_local_mac[31:0] <= XATAI;
+            end
+
+            if (write_start && (reg_addr == REG_CFG_MAC_HI)) begin
+                cfg_local_mac[47:32] <= XATAI[15:0];
+            end
+
+            if (write_start && (reg_addr == REG_CFG_FLAGS)) begin
+                cfg_mac_filter_enable <= XATAI[0] == CFG_MAC_FILTER_ENABLE;
+                cfg_accept_broadcast <= XATAI[1] == CFG_ACCEPT_BROADCAST;
+                cfg_accept_multicast <= XATAI[2] == CFG_ACCEPT_MULTICAST;
+            end
+
             if (read_start) begin
                 unique case (reg_addr)
                     REG_STATUS: begin
@@ -277,6 +310,23 @@ module darketh_mmio #(
 
                     REG_TX_LEN: begin
                         XATAO <= {{(32-PTR_WIDTH){1'b0}}, tx_config_len};
+                    end
+
+                    REG_CFG_MAC_LO: begin
+                        XATAO <= cfg_local_mac[31:0];
+                    end
+
+                    REG_CFG_MAC_HI: begin
+                        XATAO <= {16'd0, cfg_local_mac[47:32]};
+                    end
+
+                    REG_CFG_FLAGS: begin
+                        XATAO <= {
+                            29'd0,
+                            cfg_accept_multicast,
+                            cfg_accept_broadcast,
+                            cfg_mac_filter_enable
+                        };
                     end
 
                     default: begin

@@ -57,6 +57,10 @@ module darksocv
     output       ETH_TX_BUSY,
     output       ETH_TX_DONE,
     output       ETH_TX_OVERFLOW,
+    output       ETH_CFG_MAC_FILTER_ENABLE,
+    output [47:0] ETH_CFG_LOCAL_MAC,
+    output       ETH_CFG_ACCEPT_BROADCAST,
+    output       ETH_CFG_ACCEPT_MULTICAST,
 `endif
 `ifdef SPI
     output       SPI_CSN,   // SPI CSN output (active LOW)
@@ -377,7 +381,12 @@ module darksocv
         .tx_ready_for_frame (ETH_TX_READY_FOR_FRAME),
         .tx_busy            (ETH_TX_BUSY),
         .tx_done            (ETH_TX_DONE),
-        .tx_overflow        (ETH_TX_OVERFLOW)
+        .tx_overflow        (ETH_TX_OVERFLOW),
+
+        .cfg_mac_filter_enable (ETH_CFG_MAC_FILTER_ENABLE),
+        .cfg_local_mac         (ETH_CFG_LOCAL_MAC),
+        .cfg_accept_broadcast  (ETH_CFG_ACCEPT_BROADCAST),
+        .cfg_accept_multicast  (ETH_CFG_ACCEPT_MULTICAST)
     );
 
 `else
