@@ -48,6 +48,15 @@ module darksocv
     input        ETH_RX_FRAME_DROP,
     output       ETH_RX_READY_FOR_FRAME,
     output       ETH_RX_FRAME_AVAILABLE,
+    input        ETH_TX_BYTE_READY,
+    output [7:0] ETH_TX_BYTE,
+    output       ETH_TX_BYTE_VALID,
+    output       ETH_TX_FRAME_START,
+    output       ETH_TX_FRAME_END,
+    output       ETH_TX_READY_FOR_FRAME,
+    output       ETH_TX_BUSY,
+    output       ETH_TX_DONE,
+    output       ETH_TX_OVERFLOW,
 `endif
 `ifdef SPI
     output       SPI_CSN,   // SPI CSN output (active LOW)
@@ -358,7 +367,17 @@ module darksocv
         .rx_overflow        (),
         .rx_dropped         (),
         .rx_busy            (),
-        .rx_irq             ()
+        .rx_irq             (),
+
+        .tx_byte_ready      (ETH_TX_BYTE_READY),
+        .tx_byte_valid      (ETH_TX_BYTE_VALID),
+        .tx_byte            (ETH_TX_BYTE),
+        .tx_frame_start     (ETH_TX_FRAME_START),
+        .tx_frame_end       (ETH_TX_FRAME_END),
+        .tx_ready_for_frame (ETH_TX_READY_FOR_FRAME),
+        .tx_busy            (ETH_TX_BUSY),
+        .tx_done            (ETH_TX_DONE),
+        .tx_overflow        (ETH_TX_OVERFLOW)
     );
 
 `else

@@ -7,12 +7,21 @@ module darketh_mmio_tb;
     localparam int unsigned REG_RX_LEN = 32'h04;
     localparam int unsigned REG_RX_DATA = 32'h08;
     localparam int unsigned REG_RX_CTRL = 32'h0c;
+    localparam int unsigned REG_TX_STATUS = 32'h10;
+    localparam int unsigned REG_TX_LEN = 32'h14;
+    localparam int unsigned REG_TX_DATA = 32'h18;
+    localparam int unsigned REG_TX_CTRL = 32'h1c;
 
     localparam logic [31:0] STATUS_RX_AVAILABLE = 32'h0000_0001;
     localparam logic [31:0] STATUS_RX_OVERFLOW = 32'h0000_0002;
     localparam logic [31:0] STATUS_RX_DROPPED = 32'h0000_0004;
-    localparam logic [31:0] STATUS_RX_BUSY = 32'h0000_0008;
     localparam logic [31:0] STATUS_RX_READY = 32'h0000_0100;
+
+    localparam logic [31:0] STATUS_TX_READY = 32'h0000_0001;
+    localparam logic [31:0] STATUS_TX_BUSY = 32'h0000_0002;
+    localparam logic [31:0] STATUS_TX_OVERFLOW = 32'h0000_0004;
+    localparam logic [31:0] STATUS_TX_DONE = 32'h0000_0008;
+    localparam logic [31:0] STATUS_TX_WRITTEN = 32'h0000_0010;
 
     logic CLK = 1'b0;
     logic RES = 1'b1;
@@ -38,9 +47,30 @@ module darketh_mmio_tb;
     logic rx_busy;
     logic rx_irq;
 
+    logic tx_byte_ready = 1'b1;
+    logic tx_byte_valid;
+    logic [7:0] tx_byte;
+    logic tx_frame_start;
+    logic tx_frame_end;
+    logic tx_ready_for_frame;
+    logic tx_busy;
+    logic tx_done;
+    logic tx_overflow;
+
     logic [7:0] sample_frame [0:5];
+    logic [7:0] tx_seen [0:5];
+    int tx_seen_count = 0;
 
     always #5 CLK = !CLK;
+
+    always_ff @(posedge CLK) begin
+        if (tx_byte_valid) begin
+            if (tx_seen_count < 6) begin
+                tx_seen[tx_seen_count] <= tx_byte;
+            end
+            tx_seen_count <= tx_seen_count + 1;
+        end
+    end
 
     darketh_mmio #(
         .MAX_FRAME_BYTES(MAX_FRAME_BYTES)
@@ -64,7 +94,16 @@ module darketh_mmio_tb;
         .rx_overflow(rx_overflow),
         .rx_dropped(rx_dropped),
         .rx_busy(rx_busy),
-        .rx_irq(rx_irq)
+        .rx_irq(rx_irq),
+        .tx_byte_ready(tx_byte_ready),
+        .tx_byte_valid(tx_byte_valid),
+        .tx_byte(tx_byte),
+        .tx_frame_start(tx_frame_start),
+        .tx_frame_end(tx_frame_end),
+        .tx_ready_for_frame(tx_ready_for_frame),
+        .tx_busy(tx_busy),
+        .tx_done(tx_done),
+        .tx_overflow(tx_overflow)
     );
 
     task automatic mmio_read(input logic [31:0] addr, output logic [31:0] data);
@@ -149,7 +188,10 @@ module darketh_mmio_tb;
         repeat (2) @(posedge CLK);
 
         mmio_read(REG_STATUS, data);
-        check_equal(data, STATUS_RX_READY, "reset status");
+        check_equal(data, STATUS_RX_READY, "reset rx status");
+
+        mmio_read(REG_TX_STATUS, data);
+        check_equal(data, STATUS_TX_READY, "reset tx status");
 
         foreach (sample_frame[i]) begin
             feed_byte(sample_frame[i]);
@@ -191,7 +233,34 @@ module darketh_mmio_tb;
         mmio_read(REG_STATUS, data);
         check_equal(data, STATUS_RX_READY, "flags cleared");
 
-        $display("TEST PASS: darketh_mmio");
+        mmio_write(REG_TX_LEN, 32'd6);
+        foreach (sample_frame[i]) begin
+            mmio_write(REG_TX_DATA, {24'd0, sample_frame[i]});
+        end
+
+        mmio_read(REG_TX_STATUS, data);
+        check_equal(data & (STATUS_TX_READY | STATUS_TX_WRITTEN),
+                    STATUS_TX_READY | STATUS_TX_WRITTEN,
+                    "tx frame staged");
+
+        mmio_write(REG_TX_CTRL, 32'h0000_0001);
+
+        do begin
+            mmio_read(REG_TX_STATUS, data);
+        end while (!(data & STATUS_TX_DONE));
+
+        check_equal(tx_seen_count, 6, "tx byte count");
+        foreach (sample_frame[i]) begin
+            check_equal({24'd0, tx_seen[i]}, {24'd0, sample_frame[i]}, "tx byte");
+        end
+        check_equal(tx_frame_end, 1'b0, "tx frame end pulse cleared");
+
+        mmio_write(REG_TX_CTRL, 32'h0000_0004);
+
+        mmio_read(REG_TX_STATUS, data);
+        check_equal(data, STATUS_TX_READY, "tx flags cleared");
+
+        $display("TEST PASS: darketh_mmio rx tx");
         $finish;
     end
 endmodule

@@ -77,6 +77,15 @@ module darksimv;
     reg        ETH_RX_FRAME_DROP = 0;
     wire       ETH_RX_READY_FOR_FRAME;
     wire       ETH_RX_FRAME_AVAILABLE;
+    reg        ETH_TX_BYTE_READY = 1;
+    wire [7:0] ETH_TX_BYTE;
+    wire       ETH_TX_BYTE_VALID;
+    wire       ETH_TX_FRAME_START;
+    wire       ETH_TX_FRAME_END;
+    wire       ETH_TX_READY_FOR_FRAME;
+    wire       ETH_TX_BUSY;
+    wire       ETH_TX_DONE;
+    wire       ETH_TX_OVERFLOW;
 
     task eth_byte(input [7:0] data);
     begin
@@ -102,6 +111,16 @@ module darksimv;
         ETH_RX_FRAME_VALID <= 1;
         @(posedge CLK);
         ETH_RX_FRAME_VALID <= 0;
+    end
+
+    always@(posedge CLK)
+    begin
+        if(ETH_TX_BYTE_VALID)
+        begin
+            if(ETH_TX_FRAME_START) $write("darketh tx data=");
+            $write("%x",ETH_TX_BYTE);
+            if(ETH_TX_FRAME_END) $display("");
+        end
     end
 `endif
 
@@ -137,6 +156,15 @@ module darksimv;
         .ETH_RX_FRAME_DROP(ETH_RX_FRAME_DROP),
         .ETH_RX_READY_FOR_FRAME(ETH_RX_READY_FOR_FRAME),
         .ETH_RX_FRAME_AVAILABLE(ETH_RX_FRAME_AVAILABLE),
+        .ETH_TX_BYTE_READY(ETH_TX_BYTE_READY),
+        .ETH_TX_BYTE(ETH_TX_BYTE),
+        .ETH_TX_BYTE_VALID(ETH_TX_BYTE_VALID),
+        .ETH_TX_FRAME_START(ETH_TX_FRAME_START),
+        .ETH_TX_FRAME_END(ETH_TX_FRAME_END),
+        .ETH_TX_READY_FOR_FRAME(ETH_TX_READY_FOR_FRAME),
+        .ETH_TX_BUSY(ETH_TX_BUSY),
+        .ETH_TX_DONE(ETH_TX_DONE),
+        .ETH_TX_OVERFLOW(ETH_TX_OVERFLOW),
 `endif
 `ifdef __SDRAM__
         .S_CLK(S_CLK),
