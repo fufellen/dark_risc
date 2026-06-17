@@ -62,6 +62,11 @@ set rtl_files [list \
 ]
 
 set vlog_cmd [list vlog -sv $incdir +define+DARKETH_MMIO]
+if {[info exists ::env(DARKSIMV_DEFINES)] && $::env(DARKSIMV_DEFINES) ne ""} {
+    foreach extra_define $::env(DARKSIMV_DEFINES) {
+        lappend vlog_cmd $extra_define
+    }
+}
 foreach rtl_file $rtl_files {
     lappend vlog_cmd $rtl_file
 }

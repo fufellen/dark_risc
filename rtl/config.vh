@@ -284,7 +284,7 @@
 // size as the same.
 // The size is defined as 2**MLEN, i.e. the address bits used in the memory.
 // WARNING: this setup must match with the src/darksocv.ld.src file!
-`define MLEN 13 // 13: 8kB for darkshell
+`define MLEN 15 // 13: 8kB for darkshell
                 // 15: 32kB, for coremark
 
 // read-modify-write cycle:

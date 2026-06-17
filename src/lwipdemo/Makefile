@@ -1,0 +1,53 @@
+# Copyright (c) 2026
+
+include ../config.mk
+
+PROJ = lwipdemo
+
+LWIP_ROOT ?= C:/workspace/Ethernet/lwip
+LWIPDIR = $(LWIP_ROOT)/src
+
+override CFLAGS := -I. -Iarch -I$(LWIPDIR)/include $(CFLAGS)
+override CFLAGS += -Wno-incompatible-pointer-types -Wno-discarded-qualifiers
+override CFLAGS += -Wno-builtin-declaration-mismatch -Wno-implicit-function-declaration
+
+LWIP_OBJS = \
+    init.o \
+    def.o \
+    inet_chksum.o \
+    ip.o \
+    mem.o \
+    memp.o \
+    netif.o \
+    pbuf.o \
+    stats.o \
+    sys.o \
+    timeouts.o \
+    udp.o \
+    etharp.o \
+    ip4.o \
+    ip4_addr.o \
+    ethernet.o
+
+OBJS = main.o compat.o $(LWIP_OBJS)
+SRCS = main.c compat.c
+
+DEPS = $(SRCS) $(OBJS) $(LIBS)
+TARGETS = $(PROJ).a
+
+vpath %.c $(LWIPDIR)/core $(LWIPDIR)/core/ipv4 $(LWIPDIR)/netif
+
+.PHONY: all
+
+all: $(TARGETS) $(DEPS)
+	@echo sources ok for $(TARGETS).
+
+clean:
+	-rm -f $(OBJS) $(PROJ).{S,bin,lst,map,ram,rom,x86,text,data,bin,ld,o,mem,rom.mem,ram.mem,a} $(PROJ)_uart.bin
+
+%.o: %.c Makefile lwipopts.h arch/cc.h arch/sys_arch.h arch/perf.h arch/stdlib.h arch/stdint.h arch/stddef.h arch/string.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(PROJ).a: $(OBJS) Makefile
+	$(AR) $(ARFLAGS) $@ $(OBJS)
+	$(RL) $@

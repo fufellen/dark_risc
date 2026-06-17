@@ -97,20 +97,137 @@ module darksimv;
     end
     endtask
 
+    task eth_commit_frame;
+    begin
+        @(posedge CLK);
+        ETH_RX_FRAME_VALID <= 1;
+        @(posedge CLK);
+        ETH_RX_FRAME_VALID <= 0;
+    end
+    endtask
+
+`ifdef DARKETH_LWIP_FRAME
+    initial
+    begin
+        wait(RES == 0);
+        #1_000_000;
+        $display("FAIL darketh lwip sim timeout ready=%b available=%b",
+                 ETH_RX_READY_FOR_FRAME, ETH_RX_FRAME_AVAILABLE);
+        $fatal;
+    end
+`endif
+
     initial
     begin
         wait(RES == 0);
         #20_000;
+`ifdef DARKETH_LWIP_FRAME
+        $display("darketh sim rx arp request");
+        eth_byte(8'hff);
+        eth_byte(8'hff);
+        eth_byte(8'hff);
+        eth_byte(8'hff);
+        eth_byte(8'hff);
+        eth_byte(8'hff);
+        eth_byte(8'h02);
+        eth_byte(8'haa);
+        eth_byte(8'hbb);
+        eth_byte(8'hcc);
+        eth_byte(8'hdd);
+        eth_byte(8'hee);
+        eth_byte(8'h08);
+        eth_byte(8'h06);
+        eth_byte(8'h00);
+        eth_byte(8'h01);
+        eth_byte(8'h08);
+        eth_byte(8'h00);
+        eth_byte(8'h06);
+        eth_byte(8'h04);
+        eth_byte(8'h00);
+        eth_byte(8'h01);
+        eth_byte(8'h02);
+        eth_byte(8'haa);
+        eth_byte(8'hbb);
+        eth_byte(8'hcc);
+        eth_byte(8'hdd);
+        eth_byte(8'hee);
+        eth_byte(8'hc0);
+        eth_byte(8'ha8);
+        eth_byte(8'h14);
+        eth_byte(8'h0a);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'hc0);
+        eth_byte(8'ha8);
+        eth_byte(8'h14);
+        eth_byte(8'h14);
+        eth_commit_frame();
+        wait(ETH_RX_FRAME_AVAILABLE);
+        wait(ETH_RX_READY_FOR_FRAME);
+        $display("darketh sim arp consumed");
+        #20_000;
+
+        $display("darketh sim rx udp packet");
+        eth_byte(8'h02);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h01);
+        eth_byte(8'h02);
+        eth_byte(8'haa);
+        eth_byte(8'hbb);
+        eth_byte(8'hcc);
+        eth_byte(8'hdd);
+        eth_byte(8'hee);
+        eth_byte(8'h08);
+        eth_byte(8'h00);
+        eth_byte(8'h45);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h20);
+        eth_byte(8'h00);
+        eth_byte(8'h01);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h40);
+        eth_byte(8'h11);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'hc0);
+        eth_byte(8'ha8);
+        eth_byte(8'h14);
+        eth_byte(8'h0a);
+        eth_byte(8'hc0);
+        eth_byte(8'ha8);
+        eth_byte(8'h14);
+        eth_byte(8'h14);
+        eth_byte(8'h0f);
+        eth_byte(8'ha0);
+        eth_byte(8'h13);
+        eth_byte(8'h8d);
+        eth_byte(8'h00);
+        eth_byte(8'h0c);
+        eth_byte(8'h00);
+        eth_byte(8'h00);
+        eth_byte(8'h70);
+        eth_byte(8'h69);
+        eth_byte(8'h6e);
+        eth_byte(8'h67);
+        eth_commit_frame();
+`else
         eth_byte(8'hde);
         eth_byte(8'had);
         eth_byte(8'hbe);
         eth_byte(8'hef);
         eth_byte(8'h08);
         eth_byte(8'h00);
-        @(posedge CLK);
-        ETH_RX_FRAME_VALID <= 1;
-        @(posedge CLK);
-        ETH_RX_FRAME_VALID <= 0;
+        eth_commit_frame();
+`endif
     end
 
     always@(posedge CLK)
