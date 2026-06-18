@@ -42,6 +42,8 @@
 #define LIDARSIM_DATA_PORT        50100u
 #define LIDARSIM_CMD_PORT         50101u
 #define LIDARSIM_FIRMWARE_PORT    50102u
+#define LIDARSIM_MODEL            "R120_FAKE"
+#define LIDARSIM_FIRMWARE         "pegus_1"
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
 #define LIDARSIM_CONTROL_BUF_MAX  320u
@@ -307,7 +309,8 @@ static void print_config(void)
 {
     printf("lidarsim cfg mac=");
     print_mac(runtime_config.mac);
-    printf(" ip=%d.%d.%d.%d data=%d cmd=%d discovery=%d model=R120_FAKE fw=pegus_1\n",
+    printf(" ip=%d.%d.%d.%d data=%d cmd=%d discovery=%d model="
+           LIDARSIM_MODEL " fw=" LIDARSIM_FIRMWARE "\n",
            runtime_config.ip[0], runtime_config.ip[1],
            runtime_config.ip[2], runtime_config.ip[3],
            runtime_config.data_port, runtime_config.cmd_port,
@@ -595,7 +598,7 @@ static unsigned build_control_reply(unsigned proto_type,
                                                  LIDARSIM_CONTROL_REPLY_MAX - 11u);
             write_le16(out + 7, len);
         } else if (cmd == LIDAR_CMD_LIDAR_FIRMWARE && rw == LIDAR_PROTO_READ) {
-            static const char fw[] = "pegus_1";
+            static const char fw[] = LIDARSIM_FIRMWARE;
             len = sizeof(fw) - 1u;
             write_le16(out + 7, len);
             for (unsigned i = 0; i < len; i++) {
@@ -1550,7 +1553,8 @@ static unsigned is_discovery_request(const unsigned char *data, unsigned len)
 static void build_discovery_response(unsigned char out[LIDAR_DISCOVERY_RESPONSE_SIZE])
 {
     static const char sig[] = "LIDAR_RESP";
-    static const char model[] = "R120_FAKE";
+    static const char model[] = LIDARSIM_MODEL;
+    static const char fw[] = LIDARSIM_FIRMWARE;
 
     for (unsigned i = 0; i < LIDAR_DISCOVERY_RESPONSE_SIZE; i++) {
         out[i] = 0;
@@ -1576,6 +1580,9 @@ static void build_discovery_response(unsigned char out[LIDAR_DISCOVERY_RESPONSE_
     write_le16(out + 44, runtime_config.discovery_port);
     for (unsigned i = 0; i < (sizeof(model) - 1u); i++) {
         out[46 + i] = (unsigned char)model[i];
+    }
+    for (unsigned i = 0; i < (sizeof(fw) - 1u); i++) {
+        out[46 + sizeof(model) + i] = (unsigned char)fw[i];
     }
     out[78] = 0xff;
     out[79] = 0x9b;
