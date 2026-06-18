@@ -34,22 +34,22 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
 #define MEM_ALIGNMENT                   4
-#define MEM_SIZE                        8192
+#define MEM_SIZE                        4096
 #define MEMP_MEM_MALLOC                 0
 #define MEM_LIBC_MALLOC                 0
 #define MEM_USE_POOLS                   0
 
 #define MEMP_NUM_PBUF                   8
 #define MEMP_NUM_UDP_PCB                3
-#define MEMP_NUM_TCP_PCB                3
-#define MEMP_NUM_TCP_PCB_LISTEN         2
+#define MEMP_NUM_TCP_PCB                4
+#define MEMP_NUM_TCP_PCB_LISTEN         3
 #define MEMP_NUM_TCP_SEG                8
-#define MEMP_NUM_SYS_TIMEOUT            8
+#define MEMP_NUM_SYS_TIMEOUT            6
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0
 #define MEMP_NUM_TCPIP_MSG_API          0
 #define MEMP_NUM_TCPIP_MSG_INPKT        0
-#define PBUF_POOL_SIZE                  8
+#define PBUF_POOL_SIZE                  6
 #define PBUF_POOL_BUFSIZE               256
 
 #define TCP_MSS                         256

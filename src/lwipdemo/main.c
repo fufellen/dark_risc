@@ -41,10 +41,12 @@
 #define LIDARSIM_DISCOVERY_PORT   50103u
 #define LIDARSIM_DATA_PORT        50100u
 #define LIDARSIM_CMD_PORT         50101u
+#define LIDARSIM_FIRMWARE_PORT    50102u
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
 #define LIDARSIM_CONTROL_BUF_MAX  256u
 #define LIDARSIM_CONTROL_REPLY_MAX 128u
+#define LIDARSIM_FIRMWARE_BUF_MAX 320u
 
 #define LIDAR_DISCOVERY_RESPONSE_SIZE 80u
 #define LIDAR_DISCOVERY_REQUEST_SIZE  17u
@@ -84,6 +86,37 @@
 #define LIDAR_CMD_NET_CONFIG        0x60u
 #define LIDAR_CMD_LIDAR_FIRMWARE    0x7eu
 
+#define FW_CMD_CPU_PRG_BEGIN        55u
+#define FW_CMD_CPU_PRG_DATA         56u
+#define FW_CMD_CPU_PRG_END          57u
+#define FW_CMD_JMP_BOOT             61u
+
+#define FW_STATUS_NONE              0u
+#define FW_STATUS_WRONG_CONFIG      1u
+#define FW_STATUS_DEVICE_BUSY       2u
+#define FW_STATUS_CHECKSUM_ERROR    3u
+#define FW_STATUS_REJECTED          4u
+#define FW_STATUS_UNKNOWN_COMMAND   6u
+#define FW_STATUS_ERASE_PERCENT     9u
+
+#define FW_HEADER_SIZE              256u
+#define FW_FPGA_MAGIC               0xdeadbeefu
+#define FW_FLASH_SECTOR_SIZE        4096u
+#define FW_FLASH_BLOCK_SIZE         65536u
+#define FW_FLASH_PAGE_SIZE          256u
+#define FW_FLASH_MAX_SIZE           (16u * 1024u * 1024u)
+
+#define SPIBB_MOSI                  0x00000001u
+#define SPIBB_SCK                   0x00000002u
+#define SPIBB_CSN                   0x00000004u
+#define SPIBB_EN                    0x00000008u
+#define SPIBB_MISO                  0x00000040u
+
+#define SIM_FLAG_DISCOVERY          0x01u
+#define SIM_FLAG_CONTROL            0x02u
+#define SIM_FLAG_FWLOADER           0x04u
+#define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER)
+
 struct DARKETH {
     unsigned status;
     unsigned rx_len;
@@ -117,14 +150,39 @@ struct CONTROL_CONN {
     unsigned char buf[LIDARSIM_CONTROL_BUF_MAX];
 };
 
+struct FIRMWARE_CONN {
+    struct tcp_pcb *pcb;
+    unsigned len;
+    unsigned char buf[LIDARSIM_FIRMWARE_BUF_MAX];
+};
+
+struct FIRMWARE_SESSION {
+    unsigned active;
+    unsigned mock_flash;
+    unsigned stream_offset;
+    unsigned mcu_len;
+    unsigned fpga_len;
+    unsigned fpga_crc_expected;
+    unsigned fpga_start;
+    unsigned fpga_end;
+    unsigned bytes_written;
+    unsigned crc_state;
+    unsigned flash_id0;
+    unsigned flash_id1;
+    unsigned flash_id2;
+};
+
 static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
 static struct netif fpga_netif;
 static struct udp_pcb *udp_discovery_listener;
 static struct udp_pcb *udp_command_listener;
 static struct tcp_pcb *tcp_data_listener;
 static struct tcp_pcb *tcp_command_listener;
+static struct tcp_pcb *tcp_firmware_listener;
 static struct tcp_pcb *tcp_data_client;
 static struct CONTROL_CONN tcp_control;
+static struct FIRMWARE_CONN tcp_firmware;
+static struct FIRMWARE_SESSION firmware_session;
 static unsigned netif_configured;
 static char uart_line[LIDARSIM_UART_LINE_MAX];
 static unsigned uart_line_len;
@@ -190,6 +248,12 @@ static unsigned read_le24(const unsigned char *src)
            ((unsigned)src[2] << 16);
 }
 
+static unsigned read_le32(const unsigned char *src)
+{
+    return (unsigned)src[0] | ((unsigned)src[1] << 8) |
+           ((unsigned)src[2] << 16) | ((unsigned)src[3] << 24);
+}
+
 static unsigned mac_matches(const unsigned char *mac)
 {
     unsigned all_ff = 1;
@@ -224,6 +288,18 @@ static void print_mac(const unsigned char *mac)
     for (unsigned i = 0; i < 6; i++) {
         printf("%x", mac[i]);
     }
+}
+
+static void print_hex_nibble(unsigned value)
+{
+    value &= 0x0fu;
+    putchar((char)(value < 10u ? ('0' + value) : ('a' + value - 10u)));
+}
+
+static void print_hex_byte(unsigned value)
+{
+    print_hex_nibble(value >> 4);
+    print_hex_nibble(value);
 }
 
 static void print_config(void)
@@ -566,10 +642,606 @@ static err_t send_tcp_bytes(struct tcp_pcb *pcb, const unsigned char *data,
 
 static void maybe_report_sim_ok(void)
 {
-    if (sim_progress_flags == 3u) {
+    if ((sim_progress_flags & SIM_FLAGS_DONE) == SIM_FLAGS_DONE) {
         sim_progress_flags = 0xffu;
         printf("lidarsim ok\n>");
     }
+}
+
+static unsigned crc32_update_state(unsigned state, const unsigned char *data,
+                                   unsigned len)
+{
+    for (unsigned i = 0; i < len; i++) {
+        state ^= data[i];
+        for (unsigned bit = 0; bit < 8u; bit++) {
+            if (state & 1u) {
+                state = (state >> 1) ^ 0xedb88320u;
+            } else {
+                state >>= 1;
+            }
+        }
+    }
+    return state;
+}
+
+static unsigned crc32_update_byte(unsigned state, unsigned char value)
+{
+    state ^= value;
+    for (unsigned bit = 0; bit < 8u; bit++) {
+        if (state & 1u) {
+            state = (state >> 1) ^ 0xedb88320u;
+        } else {
+            state >>= 1;
+        }
+    }
+    return state;
+}
+
+static unsigned checksum16(const unsigned char *data, unsigned len)
+{
+    unsigned sum = 0;
+    for (unsigned i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    return sum & 0xffffu;
+}
+
+static unsigned build_firmware_frame(unsigned pkt_num,
+                                     const unsigned char *payload,
+                                     unsigned payload_len,
+                                     unsigned char *out)
+{
+    unsigned pos = 0;
+    out[pos++] = 0x12u;
+    out[pos++] = 0x34u;
+    write_le16(out + pos, payload_len); pos += 2u;
+    write_le32(out + pos, pkt_num); pos += 4u;
+    for (unsigned i = 0; i < payload_len; i++) {
+        out[pos++] = payload[i];
+    }
+    out[pos++] = 0x55u;
+    out[pos++] = 0xaau;
+    write_le16(out + pos, checksum16(out, pos));
+    pos += 2u;
+    return pos;
+}
+
+static void firmware_send_status(struct FIRMWARE_CONN *conn, unsigned pkt_num,
+                                 unsigned cmd, unsigned status,
+                                 unsigned percent, unsigned with_percent)
+{
+    unsigned char payload[3];
+    unsigned char frame[16];
+
+    payload[0] = (unsigned char)cmd;
+    payload[1] = (unsigned char)status;
+    if (with_percent) {
+        payload[2] = (unsigned char)percent;
+    }
+
+    unsigned frame_len = build_firmware_frame(pkt_num, payload,
+                                              with_percent ? 3u : 2u,
+                                              frame);
+    if (conn && conn->pcb) {
+        (void)send_tcp_bytes(conn->pcb, frame, frame_len);
+    }
+}
+
+static void spibb_delay(void)
+{
+    static volatile unsigned sink;
+    for (unsigned i = 0; i < 3u; i++) {
+        sink++;
+    }
+}
+
+static void spibb_write(unsigned value)
+{
+    io->oport = value;
+    spibb_delay();
+}
+
+static void spibb_idle(void)
+{
+    spibb_write(SPIBB_EN | SPIBB_CSN | SPIBB_SCK | SPIBB_MOSI);
+}
+
+static void spibb_select(void)
+{
+    spibb_idle();
+    spibb_write(SPIBB_EN | SPIBB_SCK | SPIBB_MOSI);
+}
+
+static void spibb_deselect(void)
+{
+    spibb_idle();
+}
+
+static unsigned char spibb_transfer_byte(unsigned char value)
+{
+    unsigned char rx = 0;
+
+    for (int bit = 7; bit >= 0; bit--) {
+        unsigned mosi = (value & (1u << bit)) ? SPIBB_MOSI : 0u;
+        spibb_write(SPIBB_EN | mosi);
+        spibb_write(SPIBB_EN | SPIBB_SCK | mosi);
+        rx = (unsigned char)((rx << 1) |
+             ((io->iport & SPIBB_MISO) ? 1u : 0u));
+    }
+
+    return rx;
+}
+
+static void flash_addr24(unsigned addr)
+{
+    spibb_transfer_byte((unsigned char)((addr >> 16) & 0xffu));
+    spibb_transfer_byte((unsigned char)((addr >> 8) & 0xffu));
+    spibb_transfer_byte((unsigned char)(addr & 0xffu));
+}
+
+static unsigned flash_read_jedec_id(unsigned char id[3])
+{
+    if (firmware_session.mock_flash) {
+        id[0] = 0xefu;
+        id[1] = 0x40u;
+        id[2] = 0x18u;
+        return 1;
+    }
+
+    spibb_select();
+    spibb_transfer_byte(0x9fu);
+    id[0] = spibb_transfer_byte(0x00u);
+    id[1] = spibb_transfer_byte(0x00u);
+    id[2] = spibb_transfer_byte(0x00u);
+    spibb_deselect();
+
+    if ((id[0] == 0x00u && id[1] == 0x00u && id[2] == 0x00u) ||
+        (id[0] == 0xffu && id[1] == 0xffu && id[2] == 0xffu)) {
+        return 0;
+    }
+    return 1;
+}
+
+static unsigned flash_read_status(void)
+{
+    if (firmware_session.mock_flash) {
+        return 0;
+    }
+
+    spibb_select();
+    spibb_transfer_byte(0x05u);
+    unsigned status = spibb_transfer_byte(0x00u);
+    spibb_deselect();
+    return status;
+}
+
+static unsigned flash_wait_ready(unsigned timeout_ms)
+{
+    unsigned start = sys_now();
+    do {
+        if ((flash_read_status() & 0x01u) == 0u) {
+            return 1;
+        }
+    } while ((sys_now() - start) < timeout_ms);
+    return 0;
+}
+
+static void flash_write_enable(void)
+{
+    if (firmware_session.mock_flash) {
+        return;
+    }
+
+    spibb_select();
+    spibb_transfer_byte(0x06u);
+    spibb_deselect();
+}
+
+static unsigned flash_erase_cmd(unsigned cmd, unsigned addr,
+                                unsigned timeout_ms)
+{
+    if (firmware_session.mock_flash) {
+        return 1;
+    }
+
+    flash_write_enable();
+    spibb_select();
+    spibb_transfer_byte((unsigned char)cmd);
+    flash_addr24(addr);
+    spibb_deselect();
+    return flash_wait_ready(timeout_ms);
+}
+
+static unsigned flash_page_program(unsigned addr, const unsigned char *data,
+                                   unsigned len)
+{
+    if (len == 0u) {
+        return 1;
+    }
+    if (firmware_session.mock_flash) {
+        return 1;
+    }
+
+    flash_write_enable();
+    spibb_select();
+    spibb_transfer_byte(0x02u);
+    flash_addr24(addr);
+    for (unsigned i = 0; i < len; i++) {
+        spibb_transfer_byte(data[i]);
+    }
+    spibb_deselect();
+    return flash_wait_ready(500u);
+}
+
+static unsigned firmware_flash_write(unsigned addr, const unsigned char *data,
+                                     unsigned len)
+{
+    while (len) {
+        unsigned page_room = FW_FLASH_PAGE_SIZE - (addr & (FW_FLASH_PAGE_SIZE - 1u));
+        unsigned chunk = (len < page_room) ? len : page_room;
+        if (!flash_page_program(addr, data, chunk)) {
+            return 0;
+        }
+        addr += chunk;
+        data += chunk;
+        len -= chunk;
+    }
+    return 1;
+}
+
+static unsigned firmware_flash_crc32(unsigned size, unsigned *crc_out)
+{
+    unsigned state = 0xffffffffu;
+
+    if (firmware_session.mock_flash) {
+        *crc_out = firmware_session.fpga_crc_expected;
+        return 1;
+    }
+
+    if (!flash_wait_ready(5000u)) {
+        return 0;
+    }
+
+    spibb_select();
+    spibb_transfer_byte(0x03u);
+    flash_addr24(0);
+    for (unsigned i = 0; i < size; i++) {
+        state = crc32_update_byte(state, spibb_transfer_byte(0x00u));
+    }
+    spibb_deselect();
+
+    *crc_out = state ^ 0xffffffffu;
+    return 1;
+}
+
+static unsigned firmware_flash_erase(struct FIRMWARE_CONN *conn,
+                                     unsigned pkt_num,
+                                     unsigned size)
+{
+    unsigned erase_size = (size + FW_FLASH_SECTOR_SIZE - 1u) &
+                          ~(FW_FLASH_SECTOR_SIZE - 1u);
+    unsigned addr = 0;
+    unsigned last_percent = 101u;
+
+    if (erase_size == 0u || erase_size > FW_FLASH_MAX_SIZE) {
+        return 0;
+    }
+
+    while (addr < erase_size) {
+        unsigned remaining = erase_size - addr;
+        unsigned step;
+        unsigned ok;
+
+        if ((addr & (FW_FLASH_BLOCK_SIZE - 1u)) == 0u &&
+            remaining >= FW_FLASH_BLOCK_SIZE) {
+            step = FW_FLASH_BLOCK_SIZE;
+            ok = flash_erase_cmd(0xd8u, addr, 3000u);
+        } else {
+            step = FW_FLASH_SECTOR_SIZE;
+            ok = flash_erase_cmd(0x20u, addr, 1000u);
+        }
+
+        if (!ok) {
+            return 0;
+        }
+
+        addr += step;
+        unsigned percent = (addr >= erase_size) ? 100u :
+            ((addr * 100u) / erase_size);
+        if (percent != last_percent) {
+            firmware_send_status(conn, pkt_num, FW_CMD_CPU_PRG_BEGIN,
+                                 FW_STATUS_ERASE_PERCENT, percent, 1);
+            last_percent = percent;
+        }
+    }
+    return 1;
+}
+
+static void firmware_session_clear(void)
+{
+    firmware_session.active = 0;
+    firmware_session.stream_offset = 0;
+    firmware_session.mcu_len = 0;
+    firmware_session.fpga_len = 0;
+    firmware_session.fpga_crc_expected = 0;
+    firmware_session.fpga_start = 0;
+    firmware_session.fpga_end = 0;
+    firmware_session.bytes_written = 0;
+    firmware_session.crc_state = 0xffffffffu;
+}
+
+static unsigned firmware_process_stream_data(const unsigned char *data,
+                                             unsigned len)
+{
+    unsigned current = firmware_session.stream_offset;
+    unsigned next = current + len;
+
+    if (next < current) {
+        return 0;
+    }
+
+    if (next > firmware_session.fpga_start && current < firmware_session.fpga_end) {
+        unsigned write_start = current > firmware_session.fpga_start ?
+            current : firmware_session.fpga_start;
+        unsigned write_end = next < firmware_session.fpga_end ?
+            next : firmware_session.fpga_end;
+        unsigned data_offset = write_start - current;
+        unsigned count = write_end - write_start;
+        unsigned flash_addr = write_start - firmware_session.fpga_start;
+
+        firmware_session.crc_state = crc32_update_state(
+            firmware_session.crc_state, data + data_offset, count);
+
+        if (!firmware_flash_write(flash_addr, data + data_offset, count)) {
+            return 0;
+        }
+        firmware_session.bytes_written += count;
+    }
+
+    firmware_session.stream_offset = next;
+    return 1;
+}
+
+static unsigned firmware_begin(struct FIRMWARE_CONN *conn, unsigned pkt_num,
+                               const unsigned char *data, unsigned len)
+{
+    if (len < FW_HEADER_SIZE) {
+        return FW_STATUS_WRONG_CONFIG;
+    }
+
+    firmware_session_clear();
+    firmware_session.mock_flash = (io->board_id == 0u);
+    firmware_session.mcu_len = read_le32(data + 0);
+    firmware_session.fpga_len = read_le32(data + 8);
+    firmware_session.fpga_crc_expected = read_le32(data + 12);
+    unsigned magic = read_le32(data + 128);
+
+    if (firmware_session.fpga_len == 0u ||
+        firmware_session.fpga_len > FW_FLASH_MAX_SIZE ||
+        (firmware_session.mcu_len & (FW_HEADER_SIZE - 1u)) != 0u ||
+        (firmware_session.fpga_len & (FW_HEADER_SIZE - 1u)) != 0u ||
+        magic != FW_FPGA_MAGIC) {
+        return FW_STATUS_WRONG_CONFIG;
+    }
+
+    firmware_session.fpga_start = FW_HEADER_SIZE + firmware_session.mcu_len;
+    firmware_session.fpga_end = firmware_session.fpga_start + firmware_session.fpga_len;
+    if (firmware_session.fpga_end < firmware_session.fpga_start) {
+        return FW_STATUS_WRONG_CONFIG;
+    }
+
+    unsigned char id[3];
+    if (!flash_read_jedec_id(id)) {
+        printf("fwloader flash id fail\n");
+        return FW_STATUS_REJECTED;
+    }
+
+    firmware_session.flash_id0 = id[0];
+    firmware_session.flash_id1 = id[1];
+    firmware_session.flash_id2 = id[2];
+    printf("fwloader begin mock=%d flash_id=%x%x%x fpga=%d crc=%x\n",
+           firmware_session.mock_flash, id[0], id[1], id[2],
+           firmware_session.fpga_len, firmware_session.fpga_crc_expected);
+
+    if (!firmware_flash_erase(conn, pkt_num, firmware_session.fpga_len)) {
+        printf("fwloader erase fail\n");
+        return FW_STATUS_REJECTED;
+    }
+
+    firmware_session.active = 1;
+    firmware_session.stream_offset = 0;
+    if (!firmware_process_stream_data(data, len)) {
+        firmware_session_clear();
+        return FW_STATUS_REJECTED;
+    }
+    return FW_STATUS_NONE;
+}
+
+static unsigned firmware_end(void)
+{
+    if (!firmware_session.active) {
+        return FW_STATUS_REJECTED;
+    }
+
+    unsigned actual_crc = firmware_session.crc_state ^ 0xffffffffu;
+    unsigned flash_crc = 0;
+    if (firmware_session.bytes_written != firmware_session.fpga_len) {
+        printf("fwloader size mismatch got=%d exp=%d\n",
+               firmware_session.bytes_written, firmware_session.fpga_len);
+        firmware_session_clear();
+        return FW_STATUS_WRONG_CONFIG;
+    }
+    if (actual_crc != firmware_session.fpga_crc_expected) {
+        printf("fwloader crc mismatch got=%x exp=%x\n",
+               actual_crc, firmware_session.fpga_crc_expected);
+        firmware_session_clear();
+        return FW_STATUS_CHECKSUM_ERROR;
+    }
+    if (!firmware_flash_crc32(firmware_session.fpga_len, &flash_crc)) {
+        printf("fwloader verify read fail\n");
+        firmware_session_clear();
+        return FW_STATUS_REJECTED;
+    }
+    if (flash_crc != firmware_session.fpga_crc_expected) {
+        printf("fwloader flash crc mismatch got=%x exp=%x\n",
+               flash_crc, firmware_session.fpga_crc_expected);
+        firmware_session_clear();
+        return FW_STATUS_CHECKSUM_ERROR;
+    }
+
+    printf("fwloader end ok bytes=%d crc=%x flash_crc=%x\n",
+           firmware_session.bytes_written, actual_crc, flash_crc);
+    firmware_session_clear();
+    return FW_STATUS_NONE;
+}
+
+static void firmware_process_payload(struct FIRMWARE_CONN *conn,
+                                     unsigned pkt_num,
+                                     const unsigned char *payload,
+                                     unsigned payload_len)
+{
+    if (payload_len == 0u) {
+        return;
+    }
+
+    unsigned cmd = payload[0];
+    const unsigned char *data = payload + 1;
+    unsigned data_len = payload_len - 1u;
+    unsigned status = FW_STATUS_NONE;
+
+    if (cmd == FW_CMD_JMP_BOOT) {
+        firmware_session_clear();
+        printf("fwloader boot\n");
+    } else if (cmd == FW_CMD_CPU_PRG_BEGIN) {
+        status = firmware_begin(conn, pkt_num, data, data_len);
+    } else if (cmd == FW_CMD_CPU_PRG_DATA) {
+        if (!firmware_session.active) {
+            status = FW_STATUS_REJECTED;
+        } else if (!firmware_process_stream_data(data, data_len)) {
+            status = FW_STATUS_REJECTED;
+        }
+    } else if (cmd == FW_CMD_CPU_PRG_END) {
+        status = firmware_end();
+    } else {
+        status = FW_STATUS_UNKNOWN_COMMAND;
+    }
+
+    firmware_send_status(conn, pkt_num, cmd, status, 0, 0);
+}
+
+static unsigned firmware_packet_size(const unsigned char *buf, unsigned len)
+{
+    if (len < 2u) {
+        return 0;
+    }
+    if (buf[0] != 0x12u || buf[1] != 0x34u) {
+        return 1u;
+    }
+    if (len < 8u) {
+        return 0;
+    }
+
+    unsigned payload_len = read_le16(buf + 2);
+    unsigned packet_len = 2u + 2u + 4u + payload_len + 2u + 2u;
+    if (payload_len > (FW_FLASH_PAGE_SIZE + 1u) ||
+        packet_len > LIDARSIM_FIRMWARE_BUF_MAX) {
+        return 1u;
+    }
+    if (len < packet_len) {
+        return 0;
+    }
+    if (buf[packet_len - 4u] != 0x55u ||
+        buf[packet_len - 3u] != 0xaau) {
+        return 1u;
+    }
+
+    unsigned expected = checksum16(buf, packet_len - 2u);
+    unsigned actual = read_le16(buf + packet_len - 2u);
+    return (expected == actual) ? packet_len : 1u;
+}
+
+static void parse_firmware_stream(struct FIRMWARE_CONN *conn)
+{
+    while (conn->len >= 2u) {
+        if (conn->buf[0] != 0x12u || conn->buf[1] != 0x34u) {
+            unsigned start = 1u;
+            while (start + 1u < conn->len &&
+                   !(conn->buf[start] == 0x12u &&
+                     conn->buf[start + 1u] == 0x34u)) {
+                start++;
+            }
+            memmove(conn->buf, conn->buf + start, conn->len - start);
+            conn->len -= start;
+            continue;
+        }
+
+        unsigned packet_len = firmware_packet_size(conn->buf, conn->len);
+        if (packet_len == 0u) {
+            return;
+        }
+        if (packet_len == 1u) {
+            memmove(conn->buf, conn->buf + 1, conn->len - 1u);
+            conn->len--;
+            continue;
+        }
+
+        unsigned pkt_num = read_le32(conn->buf + 4);
+        unsigned payload_len = read_le16(conn->buf + 2);
+        firmware_process_payload(conn, pkt_num, conn->buf + 8,
+                                 payload_len);
+
+        memmove(conn->buf, conn->buf + packet_len, conn->len - packet_len);
+        conn->len -= packet_len;
+    }
+}
+
+static void firmware_selftest(void)
+{
+    if (io->board_id != 0u) {
+        return;
+    }
+
+    unsigned char *buf = tcp_firmware.buf;
+
+    unsigned crc_state = 0xffffffffu;
+    for (unsigned i = 0; i < FW_FLASH_PAGE_SIZE; i++) {
+        buf[i] = (unsigned char)i;
+    }
+    crc_state = crc32_update_state(crc_state, buf, FW_FLASH_PAGE_SIZE);
+    for (unsigned i = 0; i < FW_FLASH_PAGE_SIZE; i++) {
+        buf[i] = (unsigned char)(255u - i);
+    }
+    crc_state = crc32_update_state(crc_state, buf, FW_FLASH_PAGE_SIZE);
+    unsigned crc = crc_state ^ 0xffffffffu;
+
+    for (unsigned i = 0; i < FW_HEADER_SIZE; i++) {
+        buf[i] = 0;
+    }
+    write_le32(buf + 8, FW_FLASH_PAGE_SIZE * 2u);
+    write_le32(buf + 12, crc);
+    write_le32(buf + 128, FW_FPGA_MAGIC);
+
+    unsigned st = firmware_begin(0, 0, buf, FW_HEADER_SIZE);
+    for (unsigned i = 0; i < FW_FLASH_PAGE_SIZE; i++) {
+        buf[i] = (unsigned char)i;
+    }
+    unsigned ok0 = firmware_process_stream_data(buf, FW_FLASH_PAGE_SIZE);
+    for (unsigned i = 0; i < FW_FLASH_PAGE_SIZE; i++) {
+        buf[i] = (unsigned char)(255u - i);
+    }
+    unsigned ok1 = firmware_process_stream_data(buf, FW_FLASH_PAGE_SIZE);
+
+    if (st == FW_STATUS_NONE && ok0 && ok1 &&
+        firmware_end() == FW_STATUS_NONE) {
+        printf("fwloader sim ok\n");
+        if (sim_progress_flags != 0xffu) {
+            sim_progress_flags |= SIM_FLAG_FWLOADER;
+            maybe_report_sim_ok();
+        }
+        return;
+    }
+
+    printf("fwloader sim fail status=%d\n", st);
 }
 
 static void process_control_packet_tcp(struct tcp_pcb *pcb,
@@ -617,7 +1289,7 @@ static void process_control_packet_udp(struct udp_pcb *pcb,
     printf("lidarsim udp cmd=%x rw=%d reply=%d err=%d\n",
            packet[5], packet[6], reply_len, err);
     if (err == ERR_OK && sim_progress_flags != 0xffu) {
-        sim_progress_flags |= 2u;
+        sim_progress_flags |= SIM_FLAG_CONTROL;
         maybe_report_sim_ok();
     }
 }
@@ -781,7 +1453,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         err_t err = send_udp_bytes(pcb, addr, port, reply, sizeof(reply));
         printf("lidarsim discovery reply err=%d\n", err);
         if (err == ERR_OK && sim_progress_flags != 0xffu) {
-            sim_progress_flags |= 1u;
+            sim_progress_flags |= SIM_FLAG_DISCOVERY;
             maybe_report_sim_ok();
         }
         return;
@@ -856,6 +1528,77 @@ static err_t tcp_command_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_recv(newpcb, tcp_control_recv);
     tcp_err(newpcb, tcp_control_err);
     printf("lidarsim tcp command connected\n");
+    return ERR_OK;
+}
+
+static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
+                               struct pbuf *p, err_t err)
+{
+    struct FIRMWARE_CONN *conn = (struct FIRMWARE_CONN *)arg;
+
+    if (err != ERR_OK) {
+        if (p) pbuf_free(p);
+        return err;
+    }
+
+    if (!p) {
+        tcp_close(tpcb);
+        if (conn) {
+            conn->pcb = 0;
+            conn->len = 0;
+        }
+        firmware_session_clear();
+        printf("fwloader tcp closed\n");
+        return ERR_OK;
+    }
+
+    tcp_recved(tpcb, p->tot_len);
+    for (struct pbuf *q = p; q != 0; q = q->next) {
+        unsigned char *src = (unsigned char *)q->payload;
+        for (u16_t i = 0; i < q->len; i++) {
+            if (conn->len < sizeof(conn->buf)) {
+                conn->buf[conn->len++] = src[i];
+            } else {
+                conn->len = 0;
+                firmware_session_clear();
+            }
+        }
+    }
+    pbuf_free(p);
+    parse_firmware_stream(conn);
+    return ERR_OK;
+}
+
+static void tcp_firmware_err(void *arg, err_t err)
+{
+    struct FIRMWARE_CONN *conn = (struct FIRMWARE_CONN *)arg;
+    if (conn) {
+        conn->pcb = 0;
+        conn->len = 0;
+    }
+    firmware_session_clear();
+    printf("fwloader tcp err=%d\n", err);
+}
+
+static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
+{
+    (void)arg;
+
+    if (err != ERR_OK || !newpcb) {
+        return ERR_VAL;
+    }
+
+    if (tcp_firmware.pcb && tcp_firmware.pcb != newpcb) {
+        tcp_abort(tcp_firmware.pcb);
+    }
+
+    firmware_session_clear();
+    tcp_firmware.pcb = newpcb;
+    tcp_firmware.len = 0;
+    tcp_arg(newpcb, &tcp_firmware);
+    tcp_recv(newpcb, tcp_firmware_recv);
+    tcp_err(newpcb, tcp_firmware_err);
+    printf("fwloader tcp connected\n");
     return ERR_OK;
 }
 
@@ -1152,6 +1895,25 @@ static void handle_uart_command(char *line)
         return;
     }
 
+    if (command_is(line, "flashid") || command_is(line, "fwid")) {
+        unsigned char id[3];
+        firmware_session.mock_flash = (io->board_id == 0u);
+        if (flash_read_jedec_id(id)) {
+            printf("fwloader flash_id=");
+            print_hex_byte(id[0]);
+            print_hex_byte(id[1]);
+            print_hex_byte(id[2]);
+            printf(" ok=1\n");
+        } else {
+            printf("fwloader flash_id=");
+            print_hex_byte(id[0]);
+            print_hex_byte(id[1]);
+            print_hex_byte(id[2]);
+            printf(" ok=0\n");
+        }
+        return;
+    }
+
     if (command_is(line, "mac")) {
         if (!parse_mac(arg, parsed_bytes)) {
             printf("lidarsim cfg bad mac\n");
@@ -1266,6 +2028,7 @@ int main(void)
 
     lwip_init();
     print_config();
+    firmware_selftest();
 
     ip4_from_config(&ipaddr, runtime_config.ip);
     ip4_from_config(&netmask, runtime_config.netmask);
@@ -1315,6 +2078,15 @@ int main(void)
                             tcp_command_accept);
     printf("lidarsim tcp command listen=%d port=%d\n", err,
            runtime_config.cmd_port);
+    if (err != ERR_OK) {
+        printf(">");
+        return 1;
+    }
+
+    err = tcp_listener_init(&tcp_firmware_listener, LIDARSIM_FIRMWARE_PORT,
+                            tcp_firmware_accept);
+    printf("fwloader tcp listen=%d port=%d\n", err,
+           LIDARSIM_FIRMWARE_PORT);
     if (err != ERR_OK) {
         printf(">");
         return 1;
