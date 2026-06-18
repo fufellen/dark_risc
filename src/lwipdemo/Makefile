@@ -23,6 +23,9 @@ LWIP_OBJS = \
     stats.o \
     sys.o \
     timeouts.o \
+    tcp.o \
+    tcp_in.o \
+    tcp_out.o \
     udp.o \
     etharp.o \
     ip4.o \
