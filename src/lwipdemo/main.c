@@ -44,8 +44,8 @@
 #define LIDARSIM_FIRMWARE_PORT    50102u
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
-#define LIDARSIM_CONTROL_BUF_MAX  256u
-#define LIDARSIM_CONTROL_REPLY_MAX 128u
+#define LIDARSIM_CONTROL_BUF_MAX  320u
+#define LIDARSIM_CONTROL_REPLY_MAX 320u
 #define LIDARSIM_FIRMWARE_BUF_MAX 320u
 
 #define LIDAR_DISCOVERY_RESPONSE_SIZE 80u
@@ -74,6 +74,7 @@
 #define LIDAR_CMD_LIDAR_ACTION      0x31u
 #define LIDAR_CMD_NET_IP            0x40u
 #define LIDAR_CMD_NET_DATA_PORT     0x41u
+#define LIDAR_CMD_FLASH_SPI         0x45u
 #define LIDAR_CMD_NET_MAC           0x46u
 #define LIDAR_CMD_FPGA_SET_ANG_RES  0x47u
 #define LIDAR_CMD_NET_CMD_PORT      0x4au
@@ -563,6 +564,13 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
     }
 }
 
+static void fill_flash_spi_fixed_payload(const unsigned char *request,
+                                         unsigned char payload[16]);
+static unsigned build_flash_spi_varlen_payload(const unsigned char *payload,
+                                               unsigned payload_len,
+                                               unsigned char *out,
+                                               unsigned out_capacity);
+
 static unsigned build_control_reply(unsigned proto_type,
                                     unsigned pkt_cnt,
                                     unsigned cmd,
@@ -581,7 +589,12 @@ static unsigned build_control_reply(unsigned proto_type,
 
     if (proto_type == LIDAR_PROTO_VARLEN) {
         unsigned len = payload_len;
-        if (cmd == LIDAR_CMD_LIDAR_FIRMWARE && rw == LIDAR_PROTO_READ) {
+        if (cmd == LIDAR_CMD_FLASH_SPI) {
+            len = build_flash_spi_varlen_payload(payload, payload_len,
+                                                 out + 9,
+                                                 LIDARSIM_CONTROL_REPLY_MAX - 11u);
+            write_le16(out + 7, len);
+        } else if (cmd == LIDAR_CMD_LIDAR_FIRMWARE && rw == LIDAR_PROTO_READ) {
             static const char fw[] = "pegus_1";
             len = sizeof(fw) - 1u;
             write_le16(out + 7, len);
@@ -605,7 +618,11 @@ static unsigned build_control_reply(unsigned proto_type,
         return 11u + len;
     }
 
-    fill_fixed_payload(cmd, rw, payload, out + 7);
+    if (cmd == LIDAR_CMD_FLASH_SPI) {
+        fill_flash_spi_fixed_payload(payload, out + 7);
+    } else {
+        fill_fixed_payload(cmd, rw, payload, out + 7);
+    }
     out[23] = 0xff;
     out[24] = 0x9b;
     return 25u;
@@ -887,6 +904,143 @@ static unsigned firmware_flash_write(unsigned addr, const unsigned char *data,
         len -= chunk;
     }
     return 1;
+}
+
+static unsigned flash_read_bytes(unsigned addr, unsigned char *data,
+                                 unsigned len)
+{
+    if (len == 0u) {
+        return 1;
+    }
+    if (!data || addr >= FW_FLASH_MAX_SIZE ||
+        len > (FW_FLASH_MAX_SIZE - addr)) {
+        return 0;
+    }
+    if (firmware_session.mock_flash) {
+        for (unsigned i = 0; i < len; i++) {
+            data[i] = 0xffu;
+        }
+        return 1;
+    }
+    if (!flash_wait_ready(5000u)) {
+        return 0;
+    }
+
+    spibb_select();
+    spibb_transfer_byte(0x03u);
+    flash_addr24(addr);
+    for (unsigned i = 0; i < len; i++) {
+        data[i] = spibb_transfer_byte(0x00u);
+    }
+    spibb_deselect();
+    return 1;
+}
+
+static unsigned flash_erase_sector(unsigned addr)
+{
+    if (addr >= FW_FLASH_MAX_SIZE) {
+        return 0;
+    }
+    return flash_erase_cmd(0x20u, addr & ~(FW_FLASH_SECTOR_SIZE - 1u), 1000u);
+}
+
+static void fill_flash_spi_fixed_payload(const unsigned char *request,
+                                         unsigned char payload[16])
+{
+    unsigned op = request ? request[0] : 0xffu;
+    unsigned addr = request ? read_le24(request + 2) : 0u;
+    unsigned char value = request ? request[1] : 0u;
+    unsigned ok = 0;
+
+    for (unsigned i = 0; i < 16u; i++) {
+        payload[i] = 0;
+    }
+
+    switch (op) {
+    case 0u:
+        ok = request && firmware_flash_write(addr, &value, 1u);
+        payload[0] = 0u;
+        payload[1] = ok ? value : 105u;
+        write_le24(payload + 2, addr);
+        break;
+    case 1u:
+        ok = request && flash_read_bytes(addr, &value, 1u);
+        payload[0] = 1u;
+        payload[1] = ok ? value : 105u;
+        write_le24(payload + 2, addr);
+        break;
+    case 2u:
+        ok = request && flash_erase_sector(addr);
+        payload[0] = 2u;
+        payload[1] = ok ? 0u : 105u;
+        write_le24(payload + 2, addr);
+        break;
+    case 3u:
+        payload[0] = (unsigned char)flash_read_status();
+        write_le24(payload + 2, addr);
+        break;
+    default:
+        payload[0] = (unsigned char)op;
+        payload[1] = 105u;
+        write_le24(payload + 2, addr);
+        break;
+    }
+}
+
+static unsigned build_flash_spi_varlen_payload(const unsigned char *payload,
+                                               unsigned payload_len,
+                                               unsigned char *out,
+                                               unsigned out_capacity)
+{
+    if (!payload || payload_len < 6u || !out || out_capacity < 6u) {
+        return 0;
+    }
+
+    unsigned op = payload[0];
+    unsigned addr = read_le24(payload + 1);
+    unsigned req_len = read_le16(payload + 4);
+    unsigned max_data = out_capacity - 6u;
+    unsigned data_len = req_len;
+
+    if (data_len > max_data) {
+        data_len = max_data;
+    }
+    if (addr >= FW_FLASH_MAX_SIZE) {
+        data_len = 0;
+    } else if (data_len > (FW_FLASH_MAX_SIZE - addr)) {
+        data_len = FW_FLASH_MAX_SIZE - addr;
+    }
+
+    out[0] = (unsigned char)op;
+    write_le24(out + 1, addr);
+    write_le16(out + 4, data_len);
+
+    if (op == 0u) {
+        unsigned available = payload_len - 6u;
+        if (data_len > available) {
+            data_len = available;
+        }
+        if (firmware_flash_write(addr, payload + 6, data_len)) {
+            for (unsigned i = 0; i < data_len; i++) {
+                out[6 + i] = payload[6 + i];
+            }
+        } else {
+            data_len = 0;
+        }
+        write_le16(out + 4, data_len);
+        return 6u + data_len;
+    }
+
+    if (op == 1u) {
+        if (!flash_read_bytes(addr, out + 6, data_len)) {
+            data_len = 0;
+            write_le16(out + 4, 0u);
+        }
+        return 6u + data_len;
+    }
+
+    write_le16(out + 4, 0u);
+    return 6u;
 }
 
 static unsigned firmware_flash_crc32(unsigned size, unsigned *crc_out)
