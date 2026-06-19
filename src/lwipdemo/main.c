@@ -201,13 +201,16 @@ static unsigned fpga_angle_res = 500u;
 static unsigned view_sector_start = 25000u;
 static unsigned view_sector_end = 167000u;
 static unsigned sim_progress_flags;
+static unsigned last_rx_peer_valid;
+static unsigned char last_rx_peer_mac[6];
+static unsigned char last_rx_peer_ip[4];
 
 static struct LIDARSIM_CONFIG runtime_config = {
     .mac = {0x02, 0x20, 0x20, 0x20, 0x20, 0x01},
-    .ip = {192, 168, 20, 20},
+    .ip = {192, 168, 2, 240},
     .netmask = {255, 255, 255, 0},
-    .gateway = {192, 168, 20, 1},
-    .remote_ip = {192, 168, 20, 10},
+    .gateway = {192, 168, 2, 1},
+    .remote_ip = {192, 168, 2, 146},
     .data_port = LIDARSIM_DATA_PORT,
     .data_remote_port = LIDARSIM_DATA_PORT,
     .cmd_port = LIDARSIM_CMD_PORT,
@@ -224,6 +227,12 @@ static void write_le16(unsigned char *dst, unsigned value)
 {
     dst[0] = (unsigned char)(value & 0xffu);
     dst[1] = (unsigned char)((value >> 8) & 0xffu);
+}
+
+static void write_be16(unsigned char *dst, unsigned value)
+{
+    dst[0] = (unsigned char)((value >> 8) & 0xffu);
+    dst[1] = (unsigned char)(value & 0xffu);
 }
 
 static void write_le24(unsigned char *dst, unsigned value)
@@ -334,6 +343,28 @@ static void darketh_apply_filter_config(void)
                      ETH_CFG_ACCEPT_MULTICAST;
 }
 
+static void capture_rx_ipv4_peer(const unsigned char *hdr, unsigned len)
+{
+    last_rx_peer_valid = 0;
+
+    if (!hdr || len < 34u) {
+        return;
+    }
+    if (hdr[12] != 0x08u || hdr[13] != 0x00u) {
+        return;
+    }
+    if ((hdr[14] & 0xf0u) != 0x40u || (hdr[14] & 0x0fu) != 5u) {
+        return;
+    }
+    if (hdr[23] != 17u) {
+        return;
+    }
+
+    copy_bytes(last_rx_peer_mac, hdr + 6, 6);
+    copy_bytes(last_rx_peer_ip, hdr + 26, 4);
+    last_rx_peer_valid = 1;
+}
+
 static err_t darketh_linkoutput(struct netif *netif, struct pbuf *p)
 {
     unsigned timeout = 1000000;
@@ -378,6 +409,19 @@ static err_t darketh_linkoutput(struct netif *netif, struct pbuf *p)
     return ERR_OK;
 }
 
+static err_t send_raw_frame_bytes(const unsigned char *frame, unsigned len)
+{
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_RAM);
+    if (!p) {
+        return ERR_MEM;
+    }
+
+    copy_bytes((unsigned char *)p->payload, frame, len);
+    err_t err = darketh_linkoutput(&fpga_netif, p);
+    pbuf_free(p);
+    return err;
+}
+
 static err_t darketh_netif_init(struct netif *netif)
 {
     netif->name[0] = 'd';
@@ -417,19 +461,6 @@ static void apply_netif_config(void)
     ip4_addr_set(ip_2_ip4(&fpga_netif.gw), &gw);
     IP_SET_TYPE_VAL(fpga_netif.gw, IPADDR_TYPE_V4);
     darketh_apply_filter_config();
-}
-
-static void copy_sender_ip(const ip_addr_t *addr, unsigned char out[4])
-{
-    if (!addr || !IP_IS_V4(addr)) {
-        return;
-    }
-
-    const ip4_addr_t *ip4 = ip_2_ip4(addr);
-    out[0] = ip4_addr1(ip4);
-    out[1] = ip4_addr2(ip4);
-    out[2] = ip4_addr3(ip4);
-    out[3] = ip4_addr4(ip4);
 }
 
 static void apply_net_config_payload(const unsigned char *payload, unsigned len)
@@ -668,6 +699,69 @@ static err_t send_udp_bytes(struct udp_pcb *pcb, const ip_addr_t *addr,
     err_t err = udp_sendto(pcb, reply, addr, port);
     pbuf_free(reply);
     return err;
+}
+
+static err_t send_udp_broadcast_bytes(struct udp_pcb *pcb, u16_t port,
+                                      const unsigned char *data,
+                                      unsigned len)
+{
+    return send_udp_bytes(pcb, IP_ADDR_BROADCAST, port, data, len);
+}
+
+static unsigned ipv4_header_checksum(const unsigned char *hdr, unsigned len)
+{
+    unsigned sum = 0;
+
+    for (unsigned i = 0; i < len; i += 2u) {
+        unsigned word = ((unsigned)hdr[i] << 8);
+        if ((i + 1u) < len) {
+            word |= hdr[i + 1u];
+        }
+        sum += word;
+        while (sum >> 16) {
+            sum = (sum & 0xffffu) + (sum >> 16);
+        }
+    }
+
+    return (~sum) & 0xffffu;
+}
+
+static err_t send_udp_unicast_to_last_peer(u16_t src_port, u16_t dst_port,
+                                           const unsigned char *data,
+                                           unsigned len)
+{
+    unsigned char frame[14u + 20u + 8u + LIDAR_DISCOVERY_RESPONSE_SIZE];
+    unsigned ip_len = 20u + 8u + len;
+    unsigned frame_len = 14u + ip_len;
+
+    if (!last_rx_peer_valid || len > LIDAR_DISCOVERY_RESPONSE_SIZE) {
+        return ERR_BUF;
+    }
+
+    copy_bytes(frame, last_rx_peer_mac, 6);
+    copy_bytes(frame + 6, runtime_config.mac, 6);
+    frame[12] = 0x08u;
+    frame[13] = 0x00u;
+
+    frame[14] = 0x45u;
+    frame[15] = 0x00u;
+    write_be16(frame + 16, ip_len);
+    write_be16(frame + 18, 0);
+    write_be16(frame + 20, 0);
+    frame[22] = 255u;
+    frame[23] = 17u;
+    write_be16(frame + 24, 0);
+    copy_bytes(frame + 26, runtime_config.ip, 4);
+    copy_bytes(frame + 30, last_rx_peer_ip, 4);
+    write_be16(frame + 24, ipv4_header_checksum(frame + 14, 20u));
+
+    write_be16(frame + 34, src_port);
+    write_be16(frame + 36, dst_port);
+    write_be16(frame + 38, 8u + len);
+    write_be16(frame + 40, 0);
+    copy_bytes(frame + 42, data, len);
+
+    return send_raw_frame_bytes(frame, frame_len);
 }
 
 static err_t send_tcp_bytes(struct tcp_pcb *pcb, const unsigned char *data,
@@ -1641,14 +1735,17 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     pbuf_free(p);
 
     printf("lidarsim discovery rx len=%d port=%d\n", len, port);
-    copy_sender_ip(addr, runtime_config.remote_ip);
 
     if (is_discovery_request(packet, len)) {
         unsigned char reply[LIDAR_DISCOVERY_RESPONSE_SIZE];
         build_discovery_response(reply);
-        err_t err = send_udp_bytes(pcb, addr, port, reply, sizeof(reply));
-        printf("lidarsim discovery reply err=%d\n", err);
-        if (err == ERR_OK && sim_progress_flags != 0xffu) {
+        err_t broadcast_err = send_udp_broadcast_bytes(pcb, port, reply, sizeof(reply));
+        err_t direct_err = send_udp_unicast_to_last_peer(
+            (u16_t)runtime_config.discovery_port, port, reply, sizeof(reply));
+        printf("lidarsim discovery reply broadcast=%d direct=%d\n",
+               broadcast_err, direct_err);
+        if ((broadcast_err == ERR_OK || direct_err == ERR_OK) &&
+            sim_progress_flags != 0xffu) {
             sim_progress_flags |= SIM_FLAG_DISCOVERY;
             maybe_report_sim_ok();
         }
@@ -2188,8 +2285,7 @@ static err_t poll_rx_frame(void)
 
     unsigned len = eth->rx_len;
 
-    if ((status & (ETH_STATUS_RX_OVERFLOW | ETH_STATUS_RX_DROPPED)) ||
-        (len == 0) || (len > LIDARSIM_MAX_FRAME)) {
+    if ((len == 0) || (len > LIDARSIM_MAX_FRAME)) {
         printf("lidarsim rx drop len=%d status=%x\n", len, status);
         drain_rx_frame(len);
         eth->rx_ctrl = ETH_RX_CTRL_CLEAR_FLAGS;
@@ -2204,13 +2300,20 @@ static err_t poll_rx_frame(void)
     }
 
     unsigned remaining = len;
+    unsigned header_len = 0;
+    unsigned char header[34];
     for (struct pbuf *q = p; q != 0; q = q->next) {
         unsigned char *dst = (unsigned char *)q->payload;
         for (u16_t i = 0; (i < q->len) && remaining; i++) {
-            dst[i] = eth->rx_data & 0xff;
+            unsigned char value = (unsigned char)(eth->rx_data & 0xff);
+            dst[i] = value;
+            if (header_len < sizeof(header)) {
+                header[header_len++] = value;
+            }
             remaining--;
         }
     }
+    capture_rx_ipv4_peer(header, header_len);
 
     err_t err = fpga_netif.input(p, &fpga_netif);
     if (err != ERR_OK) {
