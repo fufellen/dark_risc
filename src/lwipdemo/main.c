@@ -2086,56 +2086,32 @@ static unsigned rotate_angle_deg(unsigned angle_deg, unsigned phase_deg)
     return (a >= 360u) ? (a - 360u) : a;
 }
 
-static unsigned angle_peak_slope_mm(unsigned angle_deg, unsigned center_deg,
-                                    unsigned half_width_deg,
-                                    unsigned slope_mm_per_deg)
-{
-    unsigned diff = angle_distance_deg(angle_deg, center_deg);
-    if (diff >= half_width_deg) {
-        return 0;
-    }
-    return (half_width_deg - diff) * slope_mm_per_deg;
-}
-
 #define PIG_SNOUT_CENTER_DEG      270u
 #define PIG_SNOUT_HALF_WIDTH_DEG  50u
 #define PIG_SNOUT_CENTER_MM       1860u
 #define PIG_SNOUT_OUTER_SLOPE_MM  10u
 #define PIG_SNOUT_INNER_SLOPE_MM  8u
+#define LIDARSIM_TEST_OUTER_CIRCLE_MM 1800u
+#define LIDARSIM_TEST_INNER_CIRCLE_MM 1100u
 
 static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
-    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned dist = 1960u;
-    unsigned saddle;
+    unsigned point_index = angle_deg >> 1;
+    (void)phase_deg;
 
-    dist += angle_peak_slope_mm(a, 60u, 24u, 30u);
-    dist += angle_peak_slope_mm(a, 120u, 24u, 30u);
-    dist += angle_peak_slope_mm(a, 220u, 32u, 4u);
-    dist += angle_peak_slope_mm(a, 320u, 32u, 4u);
-
-    saddle = angle_peak_slope_mm(a, 90u, 15u, 12u);
-    return (dist > saddle) ? (dist - saddle) : 1700u;
+    /*
+     * Temporary visual baseline for explaining the snout geometry:
+     * even angular samples draw the outer circle, odd samples draw the inner one.
+     */
+    return (point_index & 1u) ? LIDARSIM_TEST_INNER_CIRCLE_MM :
+        LIDARSIM_TEST_OUTER_CIRCLE_MM;
 }
 
 static unsigned pig_snout_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
-    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned diff = angle_distance_deg(a, PIG_SNOUT_CENTER_DEG);
-    unsigned span;
-    unsigned inner;
-    unsigned outer;
-
-    if (diff >= PIG_SNOUT_HALF_WIDTH_DEG) {
-        return LIDARSIM_MSOP_INVALID_DISTANCE;
-    }
-
-    span = PIG_SNOUT_HALF_WIDTH_DEG - diff;
-    outer = PIG_SNOUT_CENTER_MM + span * PIG_SNOUT_OUTER_SLOPE_MM;
-    inner = PIG_SNOUT_CENTER_MM - span * PIG_SNOUT_INNER_SLOPE_MM;
-
-    /* One second-echo sample per angle: alternate outer/inner snout points. */
-    return ((a >> 1) & 1u) ? outer : inner;
+    (void)angle_deg;
+    (void)phase_deg;
+    return LIDARSIM_MSOP_INVALID_DISTANCE;
 }
 
 static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
