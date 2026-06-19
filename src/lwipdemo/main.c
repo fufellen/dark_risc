@@ -2086,65 +2086,70 @@ static unsigned rotate_angle_deg(unsigned angle_deg, unsigned phase_deg)
     return (a >= 360u) ? (a - 360u) : a;
 }
 
-#define LIDARSIM_SNOUT_OUTER_MM       1800u
-#define LIDARSIM_NOSTRIL_HALF_WIDTH_DEG 46u
-
-static const unsigned short nostril_near_mm[] = {
-    140, 140, 140, 140, 140, 141, 141, 141, 142, 142, 143, 144,
-    144, 145, 146, 147, 148, 149, 150, 152, 153, 155, 156, 158,
-    160, 162, 164, 166, 169, 171, 174, 177, 180, 184, 188, 192,
-    197, 202, 207, 214, 221, 229, 239, 250, 265, 286, 332
+static const unsigned char pig_head_shape_units[LIDARSIM_MSOP_POINTS] = {
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 40,
+    48, 55, 62, 70, 78, 85, 92, 100, 108, 115,
+    122, 115, 108, 100, 92, 85, 78, 70, 61, 50,
+    40, 30, 19, 16, 13, 10, 13, 16, 19, 30,
+    40, 50, 61, 70, 78, 85, 92, 100, 108, 115,
+    122, 115, 108, 100, 92, 85, 78, 70, 62, 55,
+    48, 40, 32, 32, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 34, 34, 36, 36, 38,
+    38, 40, 40, 42, 42, 44, 44, 46, 46, 48,
+    48, 48, 46, 46, 44, 44, 42, 46, 50, 53,
+    56, 60, 64, 67, 70, 74, 78, 82, 86, 91,
+    91, 91, 91, 91, 91, 91, 91, 91, 91, 91,
+    91, 91, 86, 82, 78, 74, 70, 67, 64, 60,
+    56, 53, 50, 46, 42, 44, 44, 46, 46, 48,
+    48, 48, 46, 46, 44, 44, 42, 42, 40, 40,
+    38, 38, 36, 36, 34, 34, 32, 32, 32, 32
 };
 
-static const unsigned short nostril_far_mm[] = {
-    860, 860, 859, 858, 857, 855, 853, 851, 848, 845, 842, 838,
-    834, 829, 824, 819, 813, 807, 801, 794, 787, 779, 771, 763,
-    754, 745, 735, 725, 714, 703, 692, 680, 668, 655, 641, 627,
-    612, 597, 581, 563, 545, 526, 504, 481, 454, 421, 363
+static const unsigned char pig_snout_shape_units[LIDARSIM_MSOP_POINTS] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 100,
+    69, 136, 57, 157, 50, 174, 46, 189, 43, 151,
+    123, 212, 116, 172, 38, 174, 114, 233, 118, 163,
+    35, 239, 35, 240, 35, 239, 35, 163, 118, 233,
+    114, 174, 38, 172, 116, 212, 123, 151, 43, 189,
+    46, 174, 50, 157, 57, 136, 69, 100, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
-
-static unsigned pig_nostril_diff_deg(unsigned angle_deg)
-{
-    unsigned right_diff = angle_distance_deg(angle_deg, 0u);
-    unsigned left_diff = angle_distance_deg(angle_deg, 180u);
-    return (right_diff < left_diff) ? right_diff : left_diff;
-}
 
 static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
-    unsigned point_index = angle_deg >> 1;
     unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned diff = pig_nostril_diff_deg(a);
-
-    /*
-     * With two echoes one ray cannot show the outer snout and both nostril
-     * intersections at once. Odd samples borrow echo 1 for the near nostril
-     * point; neighboring even samples keep the outer circle readable.
-     */
-    if ((point_index & 1u) &&
-        diff <= LIDARSIM_NOSTRIL_HALF_WIDTH_DEG) {
-        return nostril_near_mm[diff];
+    unsigned point_index = (a + 1u) >> 1;
+    if (point_index >= LIDARSIM_MSOP_POINTS) {
+        point_index -= LIDARSIM_MSOP_POINTS;
     }
-
-    return LIDARSIM_SNOUT_OUTER_MM;
+    return 1700u + (((unsigned)pig_head_shape_units[point_index]) << 3);
 }
 
 static unsigned pig_snout_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
-    unsigned point_index = angle_deg >> 1;
     unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned diff = pig_nostril_diff_deg(a);
-
-    if (diff > LIDARSIM_NOSTRIL_HALF_WIDTH_DEG) {
+    unsigned point_index = (a + 1u) >> 1;
+    if (point_index >= LIDARSIM_MSOP_POINTS) {
+        point_index -= LIDARSIM_MSOP_POINTS;
+    }
+    unsigned shape_unit = pig_snout_shape_units[point_index];
+    if (shape_unit == 0xffu) {
         return LIDARSIM_MSOP_INVALID_DISTANCE;
     }
-
-    if (point_index & 1u) {
-        return nostril_far_mm[diff];
-    }
-
-    return ((point_index >> 1) & 1u) ? nostril_far_mm[diff] :
-        nostril_near_mm[diff];
+    return shape_unit << 3;
 }
 
 static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
