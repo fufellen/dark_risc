@@ -45,10 +45,19 @@
 #define LIDARSIM_MODEL            "R120_FAKE"
 #define LIDARSIM_FIRMWARE         "pegus_1"
 #define LIDARSIM_MSOP_POINTS      180u
-#define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
+#define LIDARSIM_MSOP_DISTANCE_BYTES 2u
+#define LIDARSIM_MSOP_INTENSITY_BYTES 0u
+#define LIDARSIM_MSOP_ECHO_COUNT  2u
+#define LIDARSIM_MSOP_ECHO_MODE   3u
+#define LIDARSIM_MSOP_POINT_BYTES \
+    (LIDARSIM_MSOP_ECHO_COUNT * \
+     (LIDARSIM_MSOP_DISTANCE_BYTES + LIDARSIM_MSOP_INTENSITY_BYTES))
+#define LIDARSIM_MSOP_PACKET_MAX \
+    (2u + 34u + LIDARSIM_MSOP_POINTS * LIDARSIM_MSOP_POINT_BYTES + 2u)
+#define LIDARSIM_MSOP_INVALID_DISTANCE 0xffffu
 #define LIDARSIM_MSOP_PERIOD_MS   20u
-#define LIDARSIM_PIG_PERIOD_MS    1500u
 #define LIDARSIM_MSOP_TX_BUFFERS  2u
+#define LIDARSIM_PIG_PERIOD_MS    1500u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
 #define LIDARSIM_FIRMWARE_BUF_MAX 320u
@@ -195,9 +204,10 @@ static char uart_line[LIDARSIM_UART_LINE_MAX];
 static unsigned uart_line_len;
 static unsigned msop_frame_num;
 static unsigned last_msop_ms;
-static unsigned msop_inflight_frames;
-static unsigned msop_unacked_bytes;
-static unsigned msop_write_index;
+static unsigned msop_tx_head;
+static unsigned msop_tx_tail;
+static unsigned msop_tx_inflight;
+static unsigned msop_nocopy_unacked_bytes[LIDARSIM_MSOP_TX_BUFFERS];
 static unsigned target_speed_bits = 0x41a00000u;
 static unsigned voltage_ld = 27u;
 static unsigned voltage_pd = 150u;
@@ -246,6 +256,15 @@ static void write_le24(unsigned char *dst, unsigned value)
     dst[0] = (unsigned char)(value & 0xffu);
     dst[1] = (unsigned char)((value >> 8) & 0xffu);
     dst[2] = (unsigned char)((value >> 16) & 0xffu);
+}
+
+static void write_msop_distance(unsigned char *dst, unsigned value)
+{
+    if (LIDARSIM_MSOP_DISTANCE_BYTES == 3u) {
+        write_le24(dst, value);
+    } else {
+        write_le16(dst, value);
+    }
 }
 
 static void write_le32(unsigned char *dst, unsigned value)
@@ -622,9 +641,9 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
         write_le24(payload + 4, view_sector_end);
         break;
     case LIDAR_CMD_ECHO_COUNT:
-        payload[0] = 1;
-        payload[1] = 3;
-        payload[2] = 1;
+        payload[0] = LIDARSIM_MSOP_ECHO_COUNT;
+        payload[1] = LIDARSIM_MSOP_DISTANCE_BYTES;
+        payload[2] = LIDARSIM_MSOP_ECHO_MODE;
         break;
     default:
         break;
@@ -778,20 +797,6 @@ static err_t send_tcp_bytes(struct tcp_pcb *pcb, const unsigned char *data,
     }
 
     err_t err = tcp_write(pcb, data, (u16_t)len, TCP_WRITE_FLAG_COPY);
-    if (err == ERR_OK) {
-        tcp_output(pcb);
-    }
-    return err;
-}
-
-static err_t send_tcp_bytes_nocopy(struct tcp_pcb *pcb,
-                                   const unsigned char *data, unsigned len)
-{
-    if (!pcb || tcp_sndbuf(pcb) < len) {
-        return ERR_MEM;
-    }
-
-    err_t err = tcp_write(pcb, data, (u16_t)len, 0);
     if (err == ERR_OK) {
         tcp_output(pcb);
     }
@@ -1918,24 +1923,31 @@ static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 static void msop_tx_reset(void)
 {
     last_msop_ms = 0;
-    msop_inflight_frames = 0;
-    msop_unacked_bytes = 0;
-    msop_write_index = 0;
+    msop_tx_head = 0;
+    msop_tx_tail = 0;
+    msop_tx_inflight = 0;
+    for (unsigned i = 0; i < LIDARSIM_MSOP_TX_BUFFERS; i++) {
+        msop_nocopy_unacked_bytes[i] = 0;
+    }
 }
 
 static void msop_tx_acked(unsigned len)
 {
-    if (len >= msop_unacked_bytes) {
-        msop_unacked_bytes = 0;
-        msop_inflight_frames = 0;
-        return;
-    }
+    while (len && msop_tx_inflight) {
+        unsigned pending = msop_nocopy_unacked_bytes[msop_tx_tail];
 
-    msop_unacked_bytes -= len;
-    while (msop_inflight_frames &&
-           msop_unacked_bytes <=
-               (msop_inflight_frames - 1u) * LIDARSIM_MSOP_PACKET_MAX) {
-        msop_inflight_frames--;
+        if (len < pending) {
+            msop_nocopy_unacked_bytes[msop_tx_tail] = pending - len;
+            return;
+        }
+
+        len -= pending;
+        msop_nocopy_unacked_bytes[msop_tx_tail] = 0;
+        msop_tx_tail++;
+        if (msop_tx_tail >= LIDARSIM_MSOP_TX_BUFFERS) {
+            msop_tx_tail = 0;
+        }
+        msop_tx_inflight--;
     }
 }
 
@@ -2085,20 +2097,11 @@ static unsigned angle_peak_slope_mm(unsigned angle_deg, unsigned center_deg,
     return (half_width_deg - diff) * slope_mm_per_deg;
 }
 
-static unsigned angle_plateau_slope_mm(unsigned angle_deg, unsigned center_deg,
-                                       unsigned half_width_deg,
-                                       unsigned plateau_half_width_deg,
-                                       unsigned slope_mm_per_deg)
-{
-    unsigned diff = angle_distance_deg(angle_deg, center_deg);
-    if (diff <= plateau_half_width_deg) {
-        return (half_width_deg - plateau_half_width_deg) * slope_mm_per_deg;
-    }
-    if (diff >= half_width_deg) {
-        return 0;
-    }
-    return (half_width_deg - diff) * slope_mm_per_deg;
-}
+#define PIG_SNOUT_CENTER_DEG      270u
+#define PIG_SNOUT_HALF_WIDTH_DEG  50u
+#define PIG_SNOUT_CENTER_MM       1860u
+#define PIG_SNOUT_OUTER_SLOPE_MM  10u
+#define PIG_SNOUT_INNER_SLOPE_MM  8u
 
 static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
@@ -2108,12 +2111,31 @@ static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
 
     dist += angle_peak_slope_mm(a, 60u, 24u, 30u);
     dist += angle_peak_slope_mm(a, 120u, 24u, 30u);
-    dist += angle_plateau_slope_mm(a, 270u, 38u, 12u, 18u);
     dist += angle_peak_slope_mm(a, 220u, 32u, 4u);
     dist += angle_peak_slope_mm(a, 320u, 32u, 4u);
 
     saddle = angle_peak_slope_mm(a, 90u, 15u, 12u);
     return (dist > saddle) ? (dist - saddle) : 1700u;
+}
+
+static unsigned pig_snout_distance_mm(unsigned angle_deg, unsigned phase_deg)
+{
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned diff = angle_distance_deg(a, PIG_SNOUT_CENTER_DEG);
+    unsigned span;
+    unsigned inner;
+    unsigned outer;
+
+    if (diff >= PIG_SNOUT_HALF_WIDTH_DEG) {
+        return LIDARSIM_MSOP_INVALID_DISTANCE;
+    }
+
+    span = PIG_SNOUT_HALF_WIDTH_DEG - diff;
+    outer = PIG_SNOUT_CENTER_MM + span * PIG_SNOUT_OUTER_SLOPE_MM;
+    inner = PIG_SNOUT_CENTER_MM - span * PIG_SNOUT_INNER_SLOPE_MM;
+
+    /* One second-echo sample per angle: alternate outer/inner snout points. */
+    return ((a >> 1) & 1u) ? outer : inner;
 }
 
 static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
@@ -2122,14 +2144,24 @@ static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
     unsigned a = rotate_angle_deg(angle_deg, phase_deg);
     unsigned value = 50u + ((angle_deg + frame_num) & 0x1fu);
 
-    if (angle_distance_deg(a, 270u) <= 28u) {
-        value = 168u + ((frame_num + angle_deg) & 0x1fu);
-    } else if (angle_distance_deg(a, 60u) <= 20u ||
-               angle_distance_deg(a, 120u) <= 20u) {
+    if (angle_distance_deg(a, 60u) <= 20u ||
+        angle_distance_deg(a, 120u) <= 20u) {
         value = 112u + ((frame_num + angle_deg) & 0x1fu);
     }
 
     return value;
+}
+
+static unsigned pig_snout_intensity(unsigned angle_deg, unsigned phase_deg,
+                                    unsigned frame_num)
+{
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned diff = angle_distance_deg(a, 270u);
+
+    if (diff <= 10u) {
+        return 205u + ((frame_num + angle_deg) & 0x1fu);
+    }
+    return 168u + ((frame_num + angle_deg) & 0x1fu);
 }
 
 static unsigned pig_head_phase_deg(unsigned now_ms)
@@ -2158,17 +2190,30 @@ static unsigned build_msop_packet(unsigned char *out)
     write_le32(out + pos, 250000u); pos += 4;
     write_le32(out + pos, 360000u); pos += 4;
     write_le16(out + pos, 2000u); pos += 2;
-    out[pos++] = 3;
-    out[pos++] = 1;
-    out[pos++] = 1;
-    out[pos++] = 1;
+    out[pos++] = LIDARSIM_MSOP_DISTANCE_BYTES;
+    out[pos++] = LIDARSIM_MSOP_INTENSITY_BYTES;
+    out[pos++] = LIDARSIM_MSOP_ECHO_MODE;
+    out[pos++] = LIDARSIM_MSOP_ECHO_COUNT;
 
     for (unsigned i = 0; i < LIDARSIM_MSOP_POINTS; i++) {
         unsigned angle_deg = (i * 2u) % 360u;
-        unsigned dist = pig_head_distance_mm(angle_deg, phase);
-        write_le24(out + pos, dist); pos += 3;
-        out[pos++] = (unsigned char)
-            pig_head_intensity(angle_deg, phase, msop_frame_num);
+        unsigned head_dist = pig_head_distance_mm(angle_deg, phase);
+        unsigned snout_dist = pig_snout_distance_mm(angle_deg, phase);
+
+        write_msop_distance(out + pos, head_dist);
+        pos += LIDARSIM_MSOP_DISTANCE_BYTES;
+        if (LIDARSIM_MSOP_INTENSITY_BYTES) {
+            out[pos++] = (unsigned char)
+                pig_head_intensity(angle_deg, phase, msop_frame_num);
+        }
+
+        write_msop_distance(out + pos, snout_dist);
+        pos += LIDARSIM_MSOP_DISTANCE_BYTES;
+        if (LIDARSIM_MSOP_INTENSITY_BYTES) {
+            out[pos++] = (snout_dist == LIDARSIM_MSOP_INVALID_DISTANCE) ? 0u :
+                (unsigned char)pig_snout_intensity(angle_deg, phase,
+                                                   msop_frame_num);
+        }
     }
 
     out[pos++] = 0xff;
@@ -2178,14 +2223,13 @@ static unsigned build_msop_packet(unsigned char *out)
 
 static void service_msop_tcp(void)
 {
-    static unsigned char packet[LIDARSIM_MSOP_TX_BUFFERS]
-                               [LIDARSIM_MSOP_PACKET_MAX];
+    static unsigned char packets[LIDARSIM_MSOP_TX_BUFFERS][LIDARSIM_MSOP_PACKET_MAX];
 
     if (!tcp_data_client) {
         return;
     }
 
-    if (msop_inflight_frames >= LIDARSIM_MSOP_TX_BUFFERS) {
+    if (msop_tx_inflight >= LIDARSIM_MSOP_TX_BUFFERS) {
         return;
     }
 
@@ -2194,21 +2238,26 @@ static void service_msop_tcp(void)
         return;
     }
 
-    unsigned char *tx_packet =
-        packet[msop_write_index % LIDARSIM_MSOP_TX_BUFFERS];
-    unsigned len = build_msop_packet(tx_packet);
+    unsigned buf_index = msop_tx_head;
+    unsigned char *packet = packets[buf_index];
+    unsigned len = build_msop_packet(packet);
     if (tcp_sndbuf(tcp_data_client) < len) {
         return;
     }
 
-    err_t err = send_tcp_bytes_nocopy(tcp_data_client, tx_packet, len);
+    err_t err = tcp_write(tcp_data_client, packet, (u16_t)len, 0);
+    if (err == ERR_OK) {
+        tcp_output(tcp_data_client);
+    }
     if (err == ERR_OK) {
         msop_frame_num++;
         last_msop_ms = now;
-        msop_inflight_frames++;
-        msop_unacked_bytes += len;
-        msop_write_index = (msop_write_index + 1u) %
-                           LIDARSIM_MSOP_TX_BUFFERS;
+        msop_nocopy_unacked_bytes[buf_index] = len;
+        msop_tx_head++;
+        if (msop_tx_head >= LIDARSIM_MSOP_TX_BUFFERS) {
+            msop_tx_head = 0;
+        }
+        msop_tx_inflight++;
     }
 }
 
