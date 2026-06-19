@@ -47,7 +47,7 @@
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
 #define LIDARSIM_MSOP_PERIOD_MS   20u
-#define LIDARSIM_SQUARE_PERIOD_MS 1500u
+#define LIDARSIM_PIG_PERIOD_MS    1500u
 #define LIDARSIM_MSOP_TX_BUFFERS  2u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
@@ -2061,24 +2061,88 @@ static void service_pending_network_reconfig(void)
     }
 }
 
-static unsigned square_distance_mm(unsigned angle_deg, unsigned phase_deg)
+static unsigned angle_distance_deg(unsigned angle_deg, unsigned center_deg)
 {
-    unsigned a = (angle_deg + phase_deg) % 90u;
-    unsigned edge = (a <= 45u) ? a : (90u - a);
-    return 1800u + edge * 12u;
+    unsigned diff = (angle_deg >= center_deg) ?
+        (angle_deg - center_deg) : (center_deg - angle_deg);
+    return (diff > 180u) ? (360u - diff) : diff;
 }
 
-static unsigned square_phase_deg(unsigned now_ms)
+static unsigned rotate_angle_deg(unsigned angle_deg, unsigned phase_deg)
 {
-    return ((now_ms % LIDARSIM_SQUARE_PERIOD_MS) * 90u) /
-           LIDARSIM_SQUARE_PERIOD_MS;
+    unsigned a = angle_deg + phase_deg;
+    return (a >= 360u) ? (a - 360u) : a;
+}
+
+static unsigned angle_peak_slope_mm(unsigned angle_deg, unsigned center_deg,
+                                    unsigned half_width_deg,
+                                    unsigned slope_mm_per_deg)
+{
+    unsigned diff = angle_distance_deg(angle_deg, center_deg);
+    if (diff >= half_width_deg) {
+        return 0;
+    }
+    return (half_width_deg - diff) * slope_mm_per_deg;
+}
+
+static unsigned angle_plateau_slope_mm(unsigned angle_deg, unsigned center_deg,
+                                       unsigned half_width_deg,
+                                       unsigned plateau_half_width_deg,
+                                       unsigned slope_mm_per_deg)
+{
+    unsigned diff = angle_distance_deg(angle_deg, center_deg);
+    if (diff <= plateau_half_width_deg) {
+        return (half_width_deg - plateau_half_width_deg) * slope_mm_per_deg;
+    }
+    if (diff >= half_width_deg) {
+        return 0;
+    }
+    return (half_width_deg - diff) * slope_mm_per_deg;
+}
+
+static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
+{
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned dist = 1960u;
+    unsigned saddle;
+
+    dist += angle_peak_slope_mm(a, 60u, 24u, 30u);
+    dist += angle_peak_slope_mm(a, 120u, 24u, 30u);
+    dist += angle_plateau_slope_mm(a, 270u, 38u, 12u, 18u);
+    dist += angle_peak_slope_mm(a, 220u, 32u, 4u);
+    dist += angle_peak_slope_mm(a, 320u, 32u, 4u);
+
+    saddle = angle_peak_slope_mm(a, 90u, 15u, 12u);
+    return (dist > saddle) ? (dist - saddle) : 1700u;
+}
+
+static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
+                                   unsigned frame_num)
+{
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned value = 50u + ((angle_deg + frame_num) & 0x1fu);
+
+    if (angle_distance_deg(a, 270u) <= 28u) {
+        value = 168u + ((frame_num + angle_deg) & 0x1fu);
+    } else if (angle_distance_deg(a, 60u) <= 20u ||
+               angle_distance_deg(a, 120u) <= 20u) {
+        value = 112u + ((frame_num + angle_deg) & 0x1fu);
+    }
+
+    return value;
+}
+
+static unsigned pig_head_phase_deg(unsigned now_ms)
+{
+    return ((now_ms % LIDARSIM_PIG_PERIOD_MS) * 360u) /
+           LIDARSIM_PIG_PERIOD_MS;
 }
 
 static unsigned build_msop_packet(unsigned char *out)
 {
     unsigned pos = 0;
     unsigned now = sys_now();
-    unsigned phase = square_phase_deg(now);
+    unsigned phase = pig_head_phase_deg(now);
 
     out[pos++] = 0xff;
     out[pos++] = 0xfe;
@@ -2101,9 +2165,10 @@ static unsigned build_msop_packet(unsigned char *out)
 
     for (unsigned i = 0; i < LIDARSIM_MSOP_POINTS; i++) {
         unsigned angle_deg = (i * 2u) % 360u;
-        unsigned dist = square_distance_mm(angle_deg, phase);
+        unsigned dist = pig_head_distance_mm(angle_deg, phase);
         write_le24(out + pos, dist); pos += 3;
-        out[pos++] = (unsigned char)(40u + ((i + msop_frame_num) & 0x3fu));
+        out[pos++] = (unsigned char)
+            pig_head_intensity(angle_deg, phase, msop_frame_num);
     }
 
     out[pos++] = 0xff;
