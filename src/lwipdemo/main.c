@@ -2086,32 +2086,65 @@ static unsigned rotate_angle_deg(unsigned angle_deg, unsigned phase_deg)
     return (a >= 360u) ? (a - 360u) : a;
 }
 
-#define PIG_SNOUT_CENTER_DEG      270u
-#define PIG_SNOUT_HALF_WIDTH_DEG  50u
-#define PIG_SNOUT_CENTER_MM       1860u
-#define PIG_SNOUT_OUTER_SLOPE_MM  10u
-#define PIG_SNOUT_INNER_SLOPE_MM  8u
-#define LIDARSIM_TEST_OUTER_CIRCLE_MM 1800u
-#define LIDARSIM_TEST_INNER_CIRCLE_MM 1100u
+#define LIDARSIM_SNOUT_OUTER_MM       1800u
+#define LIDARSIM_NOSTRIL_HALF_WIDTH_DEG 46u
+
+static const unsigned short nostril_near_mm[] = {
+    140, 140, 140, 140, 140, 141, 141, 141, 142, 142, 143, 144,
+    144, 145, 146, 147, 148, 149, 150, 152, 153, 155, 156, 158,
+    160, 162, 164, 166, 169, 171, 174, 177, 180, 184, 188, 192,
+    197, 202, 207, 214, 221, 229, 239, 250, 265, 286, 332
+};
+
+static const unsigned short nostril_far_mm[] = {
+    860, 860, 859, 858, 857, 855, 853, 851, 848, 845, 842, 838,
+    834, 829, 824, 819, 813, 807, 801, 794, 787, 779, 771, 763,
+    754, 745, 735, 725, 714, 703, 692, 680, 668, 655, 641, 627,
+    612, 597, 581, 563, 545, 526, 504, 481, 454, 421, 363
+};
+
+static unsigned pig_nostril_diff_deg(unsigned angle_deg)
+{
+    unsigned right_diff = angle_distance_deg(angle_deg, 0u);
+    unsigned left_diff = angle_distance_deg(angle_deg, 180u);
+    return (right_diff < left_diff) ? right_diff : left_diff;
+}
 
 static unsigned pig_head_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
     unsigned point_index = angle_deg >> 1;
-    (void)phase_deg;
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned diff = pig_nostril_diff_deg(a);
 
     /*
-     * Temporary visual baseline for explaining the snout geometry:
-     * even angular samples draw the outer circle, odd samples draw the inner one.
+     * With two echoes one ray cannot show the outer snout and both nostril
+     * intersections at once. Odd samples borrow echo 1 for the near nostril
+     * point; neighboring even samples keep the outer circle readable.
      */
-    return (point_index & 1u) ? LIDARSIM_TEST_INNER_CIRCLE_MM :
-        LIDARSIM_TEST_OUTER_CIRCLE_MM;
+    if ((point_index & 1u) &&
+        diff <= LIDARSIM_NOSTRIL_HALF_WIDTH_DEG) {
+        return nostril_near_mm[diff];
+    }
+
+    return LIDARSIM_SNOUT_OUTER_MM;
 }
 
 static unsigned pig_snout_distance_mm(unsigned angle_deg, unsigned phase_deg)
 {
-    (void)angle_deg;
-    (void)phase_deg;
-    return LIDARSIM_MSOP_INVALID_DISTANCE;
+    unsigned point_index = angle_deg >> 1;
+    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
+    unsigned diff = pig_nostril_diff_deg(a);
+
+    if (diff > LIDARSIM_NOSTRIL_HALF_WIDTH_DEG) {
+        return LIDARSIM_MSOP_INVALID_DISTANCE;
+    }
+
+    if (point_index & 1u) {
+        return nostril_far_mm[diff];
+    }
+
+    return ((point_index >> 1) & 1u) ? nostril_far_mm[diff] :
+        nostril_near_mm[diff];
 }
 
 static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
