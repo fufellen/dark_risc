@@ -34,7 +34,7 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
 #define MEM_ALIGNMENT                   4
-#define MEM_SIZE                        4096
+#define MEM_SIZE                        2048
 #define MEMP_MEM_MALLOC                 0
 #define MEM_LIBC_MALLOC                 0
 #define MEM_USE_POOLS                   0

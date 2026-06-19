@@ -187,6 +187,7 @@ static struct CONTROL_CONN tcp_control;
 static struct FIRMWARE_CONN tcp_firmware;
 static struct FIRMWARE_SESSION firmware_session;
 static unsigned netif_configured;
+static unsigned network_reconfig_pending;
 static char uart_line[LIDARSIM_UART_LINE_MAX];
 static unsigned uart_line_len;
 static unsigned msop_frame_num;
@@ -408,7 +409,13 @@ static void apply_netif_config(void)
     ip4_from_config(&ipaddr, runtime_config.ip);
     ip4_from_config(&netmask, runtime_config.netmask);
     ip4_from_config(&gw, runtime_config.gateway);
-    netif_set_addr(&fpga_netif, &ipaddr, &netmask, &gw);
+    etharp_cleanup_netif(&fpga_netif);
+    ip4_addr_set(ip_2_ip4(&fpga_netif.ip_addr), &ipaddr);
+    IP_SET_TYPE_VAL(fpga_netif.ip_addr, IPADDR_TYPE_V4);
+    ip4_addr_set(ip_2_ip4(&fpga_netif.netmask), &netmask);
+    IP_SET_TYPE_VAL(fpga_netif.netmask, IPADDR_TYPE_V4);
+    ip4_addr_set(ip_2_ip4(&fpga_netif.gw), &gw);
+    IP_SET_TYPE_VAL(fpga_netif.gw, IPADDR_TYPE_V4);
     darketh_apply_filter_config();
 }
 
@@ -427,26 +434,46 @@ static void copy_sender_ip(const ip_addr_t *addr, unsigned char out[4])
 
 static void apply_net_config_payload(const unsigned char *payload, unsigned len)
 {
+    unsigned data_port;
+    unsigned data_remote_port;
+    unsigned cmd_port;
+    unsigned cmd_remote_port;
+    unsigned discovery_port;
+
     if (!payload || len < 24u || !mac_matches(payload)) {
         return;
     }
 
     copy_bytes(runtime_config.ip, payload + 6, 4);
     copy_bytes(runtime_config.remote_ip, payload + 10, 4);
-    runtime_config.data_port = read_le16(payload + 15);
-    runtime_config.data_remote_port = read_le16(payload + 17);
-    runtime_config.cmd_port = read_le16(payload + 20);
-    runtime_config.cmd_remote_port = read_le16(payload + 22);
 
-    if (runtime_config.data_port == 0) runtime_config.data_port = LIDARSIM_DATA_PORT;
-    if (runtime_config.data_remote_port == 0) runtime_config.data_remote_port = LIDARSIM_DATA_PORT;
-    if (runtime_config.cmd_port == 0) runtime_config.cmd_port = LIDARSIM_CMD_PORT;
-    if (runtime_config.cmd_remote_port == 0) runtime_config.cmd_remote_port = LIDARSIM_CMD_PORT;
-
-    if (netif_configured) {
-        apply_netif_config();
+    if (len >= 26u) {
+        data_port = read_le16(payload + 14);
+        data_remote_port = read_le16(payload + 16);
+        cmd_port = read_le16(payload + 18);
+        cmd_remote_port = read_le16(payload + 20);
+        discovery_port = read_le16(payload + 24);
+    } else {
+        data_port = read_le16(payload + 15);
+        data_remote_port = read_le16(payload + 17);
+        cmd_port = read_le16(payload + 20);
+        cmd_remote_port = read_le16(payload + 22);
+        discovery_port = runtime_config.discovery_port;
     }
-    printf("lidarsim net_config applied\n");
+
+    data_port = data_port ? data_port : LIDARSIM_DATA_PORT;
+    data_remote_port = data_remote_port ? data_remote_port : LIDARSIM_DATA_PORT;
+    cmd_port = cmd_port ? cmd_port : LIDARSIM_CMD_PORT;
+    cmd_remote_port = cmd_remote_port ? cmd_remote_port : LIDARSIM_CMD_PORT;
+    discovery_port = discovery_port ? discovery_port : LIDARSIM_DISCOVERY_PORT;
+
+    runtime_config.data_port = data_port;
+    runtime_config.data_remote_port = data_remote_port;
+    runtime_config.cmd_port = cmd_port;
+    runtime_config.cmd_remote_port = cmd_remote_port;
+    runtime_config.discovery_port = discovery_port;
+    network_reconfig_pending = 1;
+    printf("lidarsim net_config queued\n");
     print_config();
 }
 
@@ -605,9 +632,6 @@ static unsigned build_control_reply(unsigned proto_type,
                 out[9 + i] = (unsigned char)fw[i];
             }
         } else {
-            if (cmd == LIDAR_CMD_NET_CONFIG && rw == LIDAR_PROTO_WRITE) {
-                apply_net_config_payload(payload, payload_len);
-            }
             if (len > (LIDARSIM_CONTROL_REPLY_MAX - 11u)) {
                 len = LIDARSIM_CONTROL_REPLY_MAX - 11u;
             }
@@ -1421,6 +1445,11 @@ static void process_control_packet_tcp(struct tcp_pcb *pcb,
     err_t err = send_tcp_bytes(pcb, reply, reply_len);
     printf("lidarsim tcp cmd=%x rw=%d reply=%d err=%d\n",
            packet[5], packet[6], reply_len, err);
+    if (proto_type == LIDAR_PROTO_VARLEN &&
+        packet[5] == LIDAR_CMD_NET_CONFIG &&
+        packet[6] == LIDAR_PROTO_WRITE) {
+        apply_net_config_payload(payload, payload_len);
+    }
     (void)packet_len;
 }
 
@@ -1445,7 +1474,13 @@ static void process_control_packet_udp(struct udp_pcb *pcb,
     err_t err = send_udp_bytes(pcb, addr, port, reply, reply_len);
     printf("lidarsim udp cmd=%x rw=%d reply=%d err=%d\n",
            packet[5], packet[6], reply_len, err);
-    if (err == ERR_OK && sim_progress_flags != 0xffu) {
+    if (proto_type == LIDAR_PROTO_VARLEN &&
+        packet[5] == LIDAR_CMD_NET_CONFIG &&
+        packet[6] == LIDAR_PROTO_WRITE) {
+        apply_net_config_payload(payload, payload_len);
+    }
+    if (err == ERR_OK && sim_progress_flags != 0xffu &&
+        packet[5] != LIDAR_CMD_NET_CONFIG) {
         sim_progress_flags |= SIM_FLAG_CONTROL;
         maybe_report_sim_ok();
     }
@@ -1525,8 +1560,8 @@ static void udp_command_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 
     unsigned char packet[LIDARSIM_CONTROL_BUF_MAX];
     unsigned len = p->tot_len;
-    if (len > sizeof(packet)) {
-        len = sizeof(packet);
+    if (len > LIDARSIM_CONTROL_BUF_MAX) {
+        len = LIDARSIM_CONTROL_BUF_MAX;
     }
     pbuf_copy_partial(p, packet, (u16_t)len, 0);
     pbuf_free(p);
@@ -1599,8 +1634,8 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 
     unsigned char packet[LIDARSIM_CONTROL_BUF_MAX];
     unsigned len = p->tot_len;
-    if (len > sizeof(packet)) {
-        len = sizeof(packet);
+    if (len > LIDARSIM_CONTROL_BUF_MAX) {
+        len = LIDARSIM_CONTROL_BUF_MAX;
     }
     pbuf_copy_partial(p, packet, (u16_t)len, 0);
     pbuf_free(p);
@@ -1828,7 +1863,7 @@ static err_t udp_listener_init(struct udp_pcb **slot, unsigned port,
     }
 
     udp_recv(pcb, cb, 0);
-    if (port == LIDARSIM_DISCOVERY_PORT) {
+    if (port == LIDARSIM_DISCOVERY_PORT || port == LIDARSIM_CMD_PORT) {
         ip_set_option(pcb, SOF_BROADCAST);
     }
     *slot = pcb;
@@ -1859,6 +1894,18 @@ static err_t tcp_listener_init(struct tcp_pcb **slot, unsigned port,
     tcp_accept(listener, accept_cb);
     *slot = listener;
     return ERR_OK;
+}
+
+static void service_pending_network_reconfig(void)
+{
+    if (!network_reconfig_pending) {
+        return;
+    }
+
+    network_reconfig_pending = 0;
+    if (netif_configured) {
+        apply_netif_config();
+    }
 }
 
 static unsigned square_distance_mm(unsigned angle_deg, unsigned phase_deg)
@@ -2255,6 +2302,7 @@ int main(void)
 
     while (1) {
         poll_uart_config();
+        service_pending_network_reconfig();
         poll_rx_frame();
         sys_check_timeouts();
         service_msop_tcp();
