@@ -52,10 +52,11 @@
 #define PBUF_POOL_SIZE                  6
 #define PBUF_POOL_BUFSIZE               256
 
-#define TCP_MSS                         256
-#define TCP_WND                         (4 * TCP_MSS)
+#define TCP_MSS                         512
+#define TCP_WND                         (2 * TCP_MSS)
 #define TCP_SND_BUF                     (4 * TCP_MSS)
 #define TCP_SND_QUEUELEN                8
+#define TCP_OVERSIZE                    0
 #define TCP_LISTEN_BACKLOG              0
 #define TCP_QUEUE_OOSEQ                 0
 

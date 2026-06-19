@@ -46,6 +46,9 @@
 #define LIDARSIM_FIRMWARE         "pegus_1"
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_PACKET_MAX  (2u + 34u + LIDARSIM_MSOP_POINTS * 4u + 2u)
+#define LIDARSIM_MSOP_PERIOD_MS   20u
+#define LIDARSIM_SQUARE_PERIOD_MS 1500u
+#define LIDARSIM_MSOP_TX_BUFFERS  2u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
 #define LIDARSIM_FIRMWARE_BUF_MAX 320u
@@ -192,6 +195,9 @@ static char uart_line[LIDARSIM_UART_LINE_MAX];
 static unsigned uart_line_len;
 static unsigned msop_frame_num;
 static unsigned last_msop_ms;
+static unsigned msop_inflight_frames;
+static unsigned msop_unacked_bytes;
+static unsigned msop_write_index;
 static unsigned target_speed_bits = 0x41a00000u;
 static unsigned voltage_ld = 27u;
 static unsigned voltage_pd = 150u;
@@ -772,6 +778,20 @@ static err_t send_tcp_bytes(struct tcp_pcb *pcb, const unsigned char *data,
     }
 
     err_t err = tcp_write(pcb, data, (u16_t)len, TCP_WRITE_FLAG_COPY);
+    if (err == ERR_OK) {
+        tcp_output(pcb);
+    }
+    return err;
+}
+
+static err_t send_tcp_bytes_nocopy(struct tcp_pcb *pcb,
+                                   const unsigned char *data, unsigned len)
+{
+    if (!pcb || tcp_sndbuf(pcb) < len) {
+        return ERR_MEM;
+    }
+
+    err_t err = tcp_write(pcb, data, (u16_t)len, 0);
     if (err == ERR_OK) {
         tcp_output(pcb);
     }
@@ -1895,6 +1915,38 @@ static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     return ERR_OK;
 }
 
+static void msop_tx_reset(void)
+{
+    last_msop_ms = 0;
+    msop_inflight_frames = 0;
+    msop_unacked_bytes = 0;
+    msop_write_index = 0;
+}
+
+static void msop_tx_acked(unsigned len)
+{
+    if (len >= msop_unacked_bytes) {
+        msop_unacked_bytes = 0;
+        msop_inflight_frames = 0;
+        return;
+    }
+
+    msop_unacked_bytes -= len;
+    while (msop_inflight_frames &&
+           msop_unacked_bytes <=
+               (msop_inflight_frames - 1u) * LIDARSIM_MSOP_PACKET_MAX) {
+        msop_inflight_frames--;
+    }
+}
+
+static err_t tcp_data_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
+{
+    (void)arg;
+    (void)tpcb;
+    msop_tx_acked(len);
+    return ERR_OK;
+}
+
 static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
                            struct pbuf *p, err_t err)
 {
@@ -1908,6 +1960,7 @@ static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
         if (tcp_data_client == tpcb) {
             tcp_data_client = 0;
         }
+        msop_tx_reset();
         printf("lidarsim tcp data closed\n");
         return ERR_OK;
     }
@@ -1921,6 +1974,7 @@ static void tcp_data_err(void *arg, err_t err)
 {
     (void)arg;
     tcp_data_client = 0;
+    msop_tx_reset();
     printf("lidarsim tcp data err=%d\n", err);
 }
 
@@ -1938,9 +1992,11 @@ static err_t tcp_data_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     tcp_data_client = newpcb;
     tcp_arg(newpcb, 0);
+    tcp_nagle_disable(newpcb);
     tcp_recv(newpcb, tcp_data_recv);
+    tcp_sent(newpcb, tcp_data_sent);
     tcp_err(newpcb, tcp_data_err);
-    last_msop_ms = 0;
+    msop_tx_reset();
     printf("lidarsim tcp data connected\n");
     return ERR_OK;
 }
@@ -2012,11 +2068,17 @@ static unsigned square_distance_mm(unsigned angle_deg, unsigned phase_deg)
     return 1800u + edge * 12u;
 }
 
+static unsigned square_phase_deg(unsigned now_ms)
+{
+    return ((now_ms % LIDARSIM_SQUARE_PERIOD_MS) * 90u) /
+           LIDARSIM_SQUARE_PERIOD_MS;
+}
+
 static unsigned build_msop_packet(unsigned char *out)
 {
     unsigned pos = 0;
     unsigned now = sys_now();
-    unsigned phase = (msop_frame_num * 3u) % 90u;
+    unsigned phase = square_phase_deg(now);
 
     out[pos++] = 0xff;
     out[pos++] = 0xfe;
@@ -2051,26 +2113,37 @@ static unsigned build_msop_packet(unsigned char *out)
 
 static void service_msop_tcp(void)
 {
-    static unsigned char packet[LIDARSIM_MSOP_PACKET_MAX];
+    static unsigned char packet[LIDARSIM_MSOP_TX_BUFFERS]
+                               [LIDARSIM_MSOP_PACKET_MAX];
 
     if (!tcp_data_client) {
         return;
     }
 
-    unsigned now = sys_now();
-    if (last_msop_ms && (now - last_msop_ms) < 50u) {
+    if (msop_inflight_frames >= LIDARSIM_MSOP_TX_BUFFERS) {
         return;
     }
 
-    unsigned len = build_msop_packet(packet);
+    unsigned now = sys_now();
+    if (last_msop_ms && (now - last_msop_ms) < LIDARSIM_MSOP_PERIOD_MS) {
+        return;
+    }
+
+    unsigned char *tx_packet =
+        packet[msop_write_index % LIDARSIM_MSOP_TX_BUFFERS];
+    unsigned len = build_msop_packet(tx_packet);
     if (tcp_sndbuf(tcp_data_client) < len) {
         return;
     }
 
-    err_t err = send_tcp_bytes(tcp_data_client, packet, len);
+    err_t err = send_tcp_bytes_nocopy(tcp_data_client, tx_packet, len);
     if (err == ERR_OK) {
         msop_frame_num++;
         last_msop_ms = now;
+        msop_inflight_frames++;
+        msop_unacked_bytes += len;
+        msop_write_index = (msop_write_index + 1u) %
+                           LIDARSIM_MSOP_TX_BUFFERS;
     }
 }
 
