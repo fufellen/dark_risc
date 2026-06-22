@@ -510,7 +510,7 @@ module darksimv;
         ddr3_mock_mem[8'h41] = 16'habcd;
 
         wait(RES == 0);
-        #20_000_000;
+        #500_000_000;
         $display("FAIL darkddr3 sim timeout busy=%b wlevel=%b rcalib=%b",
                  DDR3_UI_BUSY, DDR3_UI_WRITE_LEVEL_DONE, DDR3_UI_READ_CALIB_DONE);
         $fatal;

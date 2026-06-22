@@ -43,6 +43,16 @@ static int wait_status(unsigned mask, unsigned expected, unsigned timeout, const
     return 0;
 }
 
+static int ddr3_clear_done(const char *what)
+{
+    ddr3->ctrl = DDR3_CTRL_CLEAR_DONE | DDR3_CTRL_CLEAR_ERROR;
+
+    return wait_status(DDR3_STATUS_OP_DONE | DDR3_STATUS_OP_ERROR,
+                       0,
+                       1000000,
+                       what);
+}
+
 static int ddr3_write32(unsigned addr, unsigned data)
 {
     if (wait_status(DDR3_STATUS_READY_FOR_CMD,
@@ -52,7 +62,10 @@ static int ddr3_write32(unsigned addr, unsigned data)
         return -1;
     }
 
-    ddr3->ctrl = DDR3_CTRL_CLEAR_DONE | DDR3_CTRL_CLEAR_ERROR;
+    if (ddr3_clear_done("write-clear")) {
+        return -1;
+    }
+
     ddr3->addr = addr;
     ddr3->wdata = data;
     ddr3->ctrl = DDR3_CTRL_START_WRITE;
@@ -81,7 +94,10 @@ static int ddr3_read32(unsigned addr, unsigned *data)
         return -1;
     }
 
-    ddr3->ctrl = DDR3_CTRL_CLEAR_DONE | DDR3_CTRL_CLEAR_ERROR;
+    if (ddr3_clear_done("read-clear")) {
+        return -1;
+    }
+
     ddr3->addr = addr;
     ddr3->ctrl = DDR3_CTRL_START_READ;
 
@@ -154,7 +170,11 @@ int main(void)
     }
 
     refresh_before = ddr3->refresh_count;
-    ddr3->ctrl = DDR3_CTRL_CLEAR_DONE | DDR3_CTRL_CLEAR_ERROR;
+    if (ddr3_clear_done("refresh-clear")) {
+        printf(">");
+        return 1;
+    }
+
     ddr3->ctrl = DDR3_CTRL_START_REFRESH;
 
     if (wait_status(DDR3_STATUS_READY_FOR_CMD,
