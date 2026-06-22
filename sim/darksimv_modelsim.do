@@ -64,12 +64,21 @@ set rtl_files [list \
     [file join $project_dir "rtl" "darkram.v"] \
     [file join $project_dir "rtl" "darkio.v"] \
     [file join $project_dir "rtl" "darketh_mmio.sv"] \
+    [file join $project_dir "rtl" "darkddr3_mmio.sv"] \
     [file join $project_dir "rtl" "darkcache.v"] \
     [file join $project_dir "rtl" "darkmac.v"] \
     [file join $project_dir "rtl" "lib" "sdram" "mt48lc16m16a2_ctrl.v"] \
 ]
 
-set vlog_cmd [list vlog -sv $incdir +define+DARKETH_MMIO]
+set base_defines [list +define+DARKETH_MMIO]
+if {[info exists ::env(DARKSIMV_BASE_DEFINES)] && $::env(DARKSIMV_BASE_DEFINES) ne ""} {
+    set base_defines $::env(DARKSIMV_BASE_DEFINES)
+}
+
+set vlog_cmd [list vlog -sv $incdir]
+foreach base_define $base_defines {
+    lappend vlog_cmd $base_define
+}
 if {[info exists ::env(DARKSIMV_DEFINES)] && $::env(DARKSIMV_DEFINES) ne ""} {
     foreach extra_define $::env(DARKSIMV_DEFINES) {
         lappend vlog_cmd $extra_define

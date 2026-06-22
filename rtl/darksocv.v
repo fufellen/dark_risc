@@ -62,6 +62,18 @@ module darksocv
     output       ETH_CFG_ACCEPT_BROADCAST,
     output       ETH_CFG_ACCEPT_MULTICAST,
 `endif
+`ifdef DARKDDR3_MMIO
+    output       DDR3_UI_RD,
+    output       DDR3_UI_WR,
+    output       DDR3_UI_REFRESH,
+    output [25:0] DDR3_UI_ADDR,
+    output [15:0] DDR3_UI_DIN,
+    input  [15:0] DDR3_UI_DOUT,
+    input        DDR3_UI_DATA_READY,
+    input        DDR3_UI_BUSY,
+    input        DDR3_UI_WRITE_LEVEL_DONE,
+    input        DDR3_UI_READ_CALIB_DONE,
+`endif
 `ifdef SPI
     output       SPI_CSN,   // SPI CSN output (active LOW)
     output       SPI_SCK,   // SPI clock output
@@ -391,6 +403,36 @@ module darksocv
 
 `else
 
+`ifdef DARKDDR3_MMIO
+
+    darkddr3_mmio ddr30
+    (
+        .CLK                    (CLK),
+        .RES                    (RES),
+
+        .XDREQ                  (XDREQMUX[2]),
+        .XRD                    (XRD),
+        .XWR                    (XWR),
+        .XBE                    (XBE),
+        .XADDR                  (XADDR),
+        .XATAI                  (XATAO),
+        .XATAO                  (XATAIMUX[2]),
+        .XDACK                  (XDACKMUX[2]),
+
+        .ddr_rd                 (DDR3_UI_RD),
+        .ddr_wr                 (DDR3_UI_WR),
+        .ddr_refresh            (DDR3_UI_REFRESH),
+        .ddr_addr               (DDR3_UI_ADDR),
+        .ddr_din                (DDR3_UI_DIN),
+        .ddr_dout               (DDR3_UI_DOUT),
+        .ddr_data_ready         (DDR3_UI_DATA_READY),
+        .ddr_busy               (DDR3_UI_BUSY),
+        .ddr_write_level_done   (DDR3_UI_WRITE_LEVEL_DONE),
+        .ddr_read_calib_done    (DDR3_UI_READ_CALIB_DONE)
+    );
+
+`else
+
     reg [3:0] DTACK2 = 0;
     reg       PRINT2 = 1;
 
@@ -408,6 +450,8 @@ module darksocv
 
     assign XATAIMUX[2] = 32'hdeadbeef;
     assign XDACKMUX[2] = DTACK2==1;
+
+`endif
 
 `endif
 

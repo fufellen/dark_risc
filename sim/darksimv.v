@@ -486,6 +486,109 @@ module darksimv;
     end
 `endif
 
+`ifdef DARKDDR3_MMIO
+    wire        DDR3_UI_RD;
+    wire        DDR3_UI_WR;
+    wire        DDR3_UI_REFRESH;
+    wire [25:0] DDR3_UI_ADDR;
+    wire [15:0] DDR3_UI_DIN;
+    reg  [15:0] DDR3_UI_DOUT = 0;
+    reg         DDR3_UI_DATA_READY = 0;
+    reg         DDR3_UI_BUSY = 1;
+    reg         DDR3_UI_WRITE_LEVEL_DONE = 0;
+    reg         DDR3_UI_READ_CALIB_DONE = 0;
+
+    reg [15:0] ddr3_mock_mem [0:255];
+    reg [25:0] ddr3_pending_read_addr = 0;
+    integer ddr3_init_count = 0;
+    integer ddr3_busy_count = 0;
+    integer ddr3_read_count = 0;
+
+    initial
+    begin
+        ddr3_mock_mem[8'h40] = 16'h1234;
+        ddr3_mock_mem[8'h41] = 16'habcd;
+
+        wait(RES == 0);
+        #20_000_000;
+        $display("FAIL darkddr3 sim timeout busy=%b wlevel=%b rcalib=%b",
+                 DDR3_UI_BUSY, DDR3_UI_WRITE_LEVEL_DONE, DDR3_UI_READ_CALIB_DONE);
+        $fatal;
+    end
+
+    always@(posedge CLK)
+    begin
+        DDR3_UI_DATA_READY <= 0;
+
+        if(RES)
+        begin
+            DDR3_UI_BUSY <= 1;
+            DDR3_UI_WRITE_LEVEL_DONE <= 0;
+            DDR3_UI_READ_CALIB_DONE <= 0;
+            DDR3_UI_DOUT <= 0;
+            ddr3_pending_read_addr <= 0;
+            ddr3_init_count <= 0;
+            ddr3_busy_count <= 0;
+            ddr3_read_count <= 0;
+        end
+        else
+        begin
+            if(!DDR3_UI_WRITE_LEVEL_DONE || !DDR3_UI_READ_CALIB_DONE)
+            begin
+                ddr3_init_count <= ddr3_init_count + 1;
+                DDR3_UI_BUSY <= 1;
+
+                if(ddr3_init_count == 4)
+                begin
+                    DDR3_UI_WRITE_LEVEL_DONE <= 1;
+                    DDR3_UI_READ_CALIB_DONE <= 1;
+                    DDR3_UI_BUSY <= 0;
+                end
+            end
+            else if(ddr3_busy_count != 0)
+            begin
+                ddr3_busy_count <= ddr3_busy_count - 1;
+                DDR3_UI_BUSY <= ddr3_busy_count != 1;
+            end
+            else
+            begin
+                DDR3_UI_BUSY <= 0;
+            end
+
+            if(ddr3_read_count != 0)
+            begin
+                ddr3_read_count <= ddr3_read_count - 1;
+                if(ddr3_read_count == 1)
+                begin
+                    DDR3_UI_DOUT <= ddr3_mock_mem[ddr3_pending_read_addr[7:0]];
+                    DDR3_UI_DATA_READY <= 1;
+                end
+            end
+
+            if(DDR3_UI_WR)
+            begin
+                ddr3_mock_mem[DDR3_UI_ADDR[7:0]] <= DDR3_UI_DIN;
+                DDR3_UI_BUSY <= 1;
+                ddr3_busy_count <= 2;
+            end
+
+            if(DDR3_UI_RD)
+            begin
+                ddr3_pending_read_addr <= DDR3_UI_ADDR;
+                DDR3_UI_BUSY <= 1;
+                ddr3_busy_count <= 3;
+                ddr3_read_count <= 3;
+            end
+
+            if(DDR3_UI_REFRESH)
+            begin
+                DDR3_UI_BUSY <= 1;
+                ddr3_busy_count <= 2;
+            end
+        end
+    end
+`endif
+
 `ifdef __SDRAM__
 
     // sdram sim model!
@@ -531,6 +634,18 @@ module darksimv;
         .ETH_CFG_LOCAL_MAC(ETH_CFG_LOCAL_MAC),
         .ETH_CFG_ACCEPT_BROADCAST(ETH_CFG_ACCEPT_BROADCAST),
         .ETH_CFG_ACCEPT_MULTICAST(ETH_CFG_ACCEPT_MULTICAST),
+`endif
+`ifdef DARKDDR3_MMIO
+        .DDR3_UI_RD(DDR3_UI_RD),
+        .DDR3_UI_WR(DDR3_UI_WR),
+        .DDR3_UI_REFRESH(DDR3_UI_REFRESH),
+        .DDR3_UI_ADDR(DDR3_UI_ADDR),
+        .DDR3_UI_DIN(DDR3_UI_DIN),
+        .DDR3_UI_DOUT(DDR3_UI_DOUT),
+        .DDR3_UI_DATA_READY(DDR3_UI_DATA_READY),
+        .DDR3_UI_BUSY(DDR3_UI_BUSY),
+        .DDR3_UI_WRITE_LEVEL_DONE(DDR3_UI_WRITE_LEVEL_DONE),
+        .DDR3_UI_READ_CALIB_DONE(DDR3_UI_READ_CALIB_DONE),
 `endif
 `ifdef __SDRAM__
         .S_CLK(S_CLK),
