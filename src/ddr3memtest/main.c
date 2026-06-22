@@ -1,7 +1,9 @@
 #include <io.h>
 #include <stdio.h>
 
+#ifndef DARKDDR3_BASE
 #define DARKDDR3_BASE 0x80000000u
+#endif
 
 #ifndef DDR3MEMTEST_WORDS
 #define DDR3MEMTEST_WORDS 1024

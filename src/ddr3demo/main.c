@@ -1,7 +1,9 @@
 #include <io.h>
 #include <stdio.h>
 
+#ifndef DARKDDR3_BASE
 #define DARKDDR3_BASE 0x80000000u
+#endif
 
 #define DDR3_STATUS_INIT_DONE       0x00000001u
 #define DDR3_STATUS_WRITE_LEVEL     0x00000002u

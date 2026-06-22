@@ -74,6 +74,12 @@ module darksocv
     input        DDR3_UI_WRITE_LEVEL_DONE,
     input        DDR3_UI_READ_CALIB_DONE,
 `endif
+
+`ifdef DARKETH_MMIO
+`ifdef DARKDDR3_MMIO
+`define DARKDDR3_MMIO_CS3
+`endif
+`endif
 `ifdef SPI
     output       SPI_CSN,   // SPI CSN output (active LOW)
     output       SPI_SCK,   // SPI clock output
@@ -404,6 +410,7 @@ module darksocv
 `else
 
 `ifdef DARKDDR3_MMIO
+`ifndef DARKDDR3_MMIO_CS3
 
     darkddr3_mmio #(
         .REFRESH_INTERVAL_CYCLES(`BOARD_CK / 128000)
@@ -442,6 +449,28 @@ module darksocv
     begin
         DTACK2 <= RES ? 0 : DTACK2 ? DTACK2-1 : XDREQMUX[2] ? 13 : 0;
 `ifdef SIMULATION
+        if(XDREQMUX[2] && PRINT2)
+        begin
+            $display("sdram: unmapped addr=%x",XADDR);
+            PRINT2 <= 0;
+        end
+`endif
+    end
+
+    assign XATAIMUX[2] = 32'hdeadbeef;
+    assign XDACKMUX[2] = DTACK2==1;
+
+`endif
+
+`else
+
+    reg [3:0] DTACK2 = 0;
+    reg       PRINT2 = 1;
+
+    always@(posedge CLK)
+    begin
+        DTACK2 <= RES ? 0 : DTACK2 ? DTACK2-1 : XDREQMUX[2] ? 13 : 0;
+`ifdef SIMULATION
         if(XDREQMUX[2] && PRINT2) 
         begin
             $display("sdram: unmapped addr=%x",XADDR);
@@ -459,7 +488,39 @@ module darksocv
 
 `endif
 
-    // unmapped area w/ CS==3
+    // unmapped area w/ CS==3, or DDR3 diagnostics when Ethernet already owns CS==2
+
+`ifdef DARKDDR3_MMIO_CS3
+
+    darkddr3_mmio #(
+        .REFRESH_INTERVAL_CYCLES(`BOARD_CK / 128000)
+    ) ddr30
+    (
+        .CLK                    (CLK),
+        .RES                    (RES),
+
+        .XDREQ                  (XDREQMUX[3]),
+        .XRD                    (XRD),
+        .XWR                    (XWR),
+        .XBE                    (XBE),
+        .XADDR                  (XADDR),
+        .XATAI                  (XATAO),
+        .XATAO                  (XATAIMUX[3]),
+        .XDACK                  (XDACKMUX[3]),
+
+        .ddr_rd                 (DDR3_UI_RD),
+        .ddr_wr                 (DDR3_UI_WR),
+        .ddr_refresh            (DDR3_UI_REFRESH),
+        .ddr_addr               (DDR3_UI_ADDR),
+        .ddr_din                (DDR3_UI_DIN),
+        .ddr_dout               (DDR3_UI_DOUT),
+        .ddr_data_ready         (DDR3_UI_DATA_READY),
+        .ddr_busy               (DDR3_UI_BUSY),
+        .ddr_write_level_done   (DDR3_UI_WRITE_LEVEL_DONE),
+        .ddr_read_calib_done    (DDR3_UI_READ_CALIB_DONE)
+    );
+
+`else
 
     reg [3:0] DTACK3 = 0;
     reg PRINT3 = 1;
@@ -478,6 +539,8 @@ module darksocv
 
     assign XATAIMUX[3] = 32'hdeadbeef;
     assign XDACKMUX[3] = DTACK3==1;
+
+`endif
 
 `ifdef SPI
 `ifndef SPIBB

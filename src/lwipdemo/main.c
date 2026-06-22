@@ -14,6 +14,14 @@
 
 #define DARKETH_BASE 0x80000000u
 
+#ifndef DARKDDR3_BASE
+#define DARKDDR3_BASE 0xc0000000u
+#endif
+
+#ifndef LIDARSIM_DDR3_TIMEOUT
+#define LIDARSIM_DDR3_TIMEOUT 2000000u
+#endif
+
 #define ETH_STATUS_RX_AVAILABLE 0x00000001u
 #define ETH_STATUS_RX_OVERFLOW  0x00000002u
 #define ETH_STATUS_RX_DROPPED   0x00000004u
@@ -36,6 +44,20 @@
 #define ETH_CFG_ACCEPT_BROADCAST  0x00000002u
 #define ETH_CFG_ACCEPT_MULTICAST  0x00000004u
 
+#define DDR3_STATUS_INIT_DONE       0x00000001u
+#define DDR3_STATUS_WRITE_LEVEL     0x00000002u
+#define DDR3_STATUS_READ_CALIB      0x00000004u
+#define DDR3_STATUS_OP_BUSY         0x00000010u
+#define DDR3_STATUS_OP_DONE         0x00000020u
+#define DDR3_STATUS_OP_ERROR        0x00000040u
+#define DDR3_STATUS_READY_FOR_CMD   0x00000100u
+
+#define DDR3_CTRL_START_READ        0x00000001u
+#define DDR3_CTRL_START_WRITE       0x00000002u
+#define DDR3_CTRL_START_REFRESH     0x00000004u
+#define DDR3_CTRL_CLEAR_DONE        0x00000100u
+#define DDR3_CTRL_CLEAR_ERROR       0x00000200u
+
 #define LIDARSIM_MAX_FRAME        1518u
 #define LIDARSIM_UART_LINE_MAX    64u
 #define LIDARSIM_DISCOVERY_PORT   50103u
@@ -56,11 +78,18 @@
     (2u + 34u + LIDARSIM_MSOP_POINTS * LIDARSIM_MSOP_POINT_BYTES + 2u)
 #define LIDARSIM_MSOP_INVALID_DISTANCE 0xffffu
 #define LIDARSIM_MSOP_PERIOD_MS   20u
+#ifdef LIDARSIM_DDR3_DIAG
+#define LIDARSIM_MSOP_TX_BUFFERS  1u
+#define LIDARSIM_CONTROL_BUF_MAX  160u
+#define LIDARSIM_CONTROL_REPLY_MAX 160u
+#define LIDARSIM_FIRMWARE_BUF_MAX 160u
+#else
 #define LIDARSIM_MSOP_TX_BUFFERS  2u
-#define LIDARSIM_PIG_PERIOD_MS    1500u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
 #define LIDARSIM_FIRMWARE_BUF_MAX 320u
+#endif
+#define LIDARSIM_PIG_PERIOD_MS    1500u
 
 #define LIDAR_DISCOVERY_RESPONSE_SIZE 80u
 #define LIDAR_DISCOVERY_REQUEST_SIZE  17u
@@ -146,6 +175,17 @@ struct DARKETH {
     unsigned cfg_flags;
 };
 
+#ifdef LIDARSIM_DDR3_DIAG
+struct DARKDDR3 {
+    unsigned status;
+    unsigned addr;
+    unsigned wdata;
+    unsigned rdata;
+    unsigned ctrl;
+    unsigned refresh_count;
+};
+#endif
+
 struct LIDARSIM_CONFIG {
     unsigned char mac[6];
     unsigned char ip[4];
@@ -188,6 +228,9 @@ struct FIRMWARE_SESSION {
 };
 
 static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
+#ifdef LIDARSIM_DDR3_DIAG
+static volatile struct DARKDDR3 *ddr3 = (volatile struct DARKDDR3 *)DARKDDR3_BASE;
+#endif
 static struct netif fpga_netif;
 static struct udp_pcb *udp_discovery_listener;
 static struct udp_pcb *udp_command_listener;
@@ -351,6 +394,110 @@ static void print_config(void)
            runtime_config.data_port, runtime_config.cmd_port,
            runtime_config.discovery_port);
 }
+
+#ifdef LIDARSIM_DDR3_DIAG
+static int ddr3_wait_status(unsigned mask, unsigned expected,
+                            unsigned timeout, const char *what)
+{
+    while (((ddr3->status & mask) != expected) && timeout) {
+        timeout--;
+    }
+
+    if (!timeout) {
+        printf("lidarsim ddr3 timeout %s status=%x\n", what, ddr3->status);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ddr3_clear_done(const char *what)
+{
+    ddr3->ctrl = DDR3_CTRL_CLEAR_DONE | DDR3_CTRL_CLEAR_ERROR;
+    return ddr3_wait_status(DDR3_STATUS_OP_DONE | DDR3_STATUS_OP_ERROR,
+                            0, LIDARSIM_DDR3_TIMEOUT, what);
+}
+
+static int ddr3_write32(unsigned addr, unsigned data)
+{
+    if (ddr3_wait_status(DDR3_STATUS_READY_FOR_CMD,
+                         DDR3_STATUS_READY_FOR_CMD,
+                         LIDARSIM_DDR3_TIMEOUT, "write-ready") ||
+        ddr3_clear_done("write-clear")) {
+        return -1;
+    }
+
+    ddr3->addr = addr;
+    ddr3->wdata = data;
+    ddr3->ctrl = DDR3_CTRL_START_WRITE;
+
+    return ddr3_wait_status(DDR3_STATUS_OP_DONE | DDR3_STATUS_OP_BUSY,
+                            DDR3_STATUS_OP_DONE, LIDARSIM_DDR3_TIMEOUT, "write-done");
+}
+
+static int ddr3_read32(unsigned addr, unsigned *data)
+{
+    if (ddr3_wait_status(DDR3_STATUS_READY_FOR_CMD,
+                         DDR3_STATUS_READY_FOR_CMD,
+                         LIDARSIM_DDR3_TIMEOUT, "read-ready") ||
+        ddr3_clear_done("read-clear")) {
+        return -1;
+    }
+
+    ddr3->addr = addr;
+    ddr3->ctrl = DDR3_CTRL_START_READ;
+
+    if (ddr3_wait_status(DDR3_STATUS_OP_DONE | DDR3_STATUS_OP_BUSY,
+                         DDR3_STATUS_OP_DONE, LIDARSIM_DDR3_TIMEOUT, "read-done")) {
+        return -1;
+    }
+
+    *data = ddr3->rdata;
+    return 0;
+}
+
+static int lidarsim_ddr3_diag(void)
+{
+    unsigned actual = 0;
+    unsigned refresh_before;
+    unsigned refresh_after;
+
+    printf("lidarsim ddr3 status=%x base=%x\n", ddr3->status, DARKDDR3_BASE);
+
+    if (ddr3_wait_status(DDR3_STATUS_INIT_DONE | DDR3_STATUS_WRITE_LEVEL |
+                         DDR3_STATUS_READ_CALIB | DDR3_STATUS_READY_FOR_CMD,
+                         DDR3_STATUS_INIT_DONE | DDR3_STATUS_WRITE_LEVEL |
+                         DDR3_STATUS_READ_CALIB | DDR3_STATUS_READY_FOR_CMD,
+                         LIDARSIM_DDR3_TIMEOUT, "init")) {
+        return -1;
+    }
+
+    if (ddr3_write32(0x30u, 0x5a5ac33cu) ||
+        ddr3_read32(0x30u, &actual)) {
+        return -1;
+    }
+
+    if (actual != 0x5a5ac33cu) {
+        printf("lidarsim ddr3 mismatch expected=5a5ac33c actual=%x\n", actual);
+        return -1;
+    }
+
+    refresh_before = ddr3->refresh_count;
+    if (ddr3_clear_done("refresh-clear")) {
+        return -1;
+    }
+    ddr3->ctrl = DDR3_CTRL_START_REFRESH;
+
+    if (ddr3_wait_status(DDR3_STATUS_OP_DONE | DDR3_STATUS_OP_BUSY,
+                         DDR3_STATUS_OP_DONE, LIDARSIM_DDR3_TIMEOUT, "refresh-done")) {
+        return -1;
+    }
+
+    refresh_after = ddr3->refresh_count;
+    printf("lidarsim ddr3 ok refresh=%x to %x\n", refresh_before, refresh_after);
+    return 0;
+}
+#endif
 
 static void darketh_apply_filter_config(void)
 {
@@ -2420,6 +2567,13 @@ static void handle_uart_command(char *line)
         return;
     }
 
+#ifdef LIDARSIM_DDR3_DIAG
+    if (command_is(line, "ddr3")) {
+        (void)lidarsim_ddr3_diag();
+        return;
+    }
+#endif
+
     if (command_is(line, "mac")) {
         if (!parse_mac(arg, parsed_bytes)) {
             printf("lidarsim cfg bad mac\n");
@@ -2541,6 +2695,12 @@ int main(void)
     lwip_init();
     print_config();
     firmware_selftest();
+#ifdef LIDARSIM_DDR3_DIAG
+    if (lidarsim_ddr3_diag()) {
+        printf(">");
+        return 1;
+    }
+#endif
 
     ip4_from_config(&ipaddr, runtime_config.ip);
     ip4_from_config(&netmask, runtime_config.netmask);

@@ -70,6 +70,7 @@ module darkddr3_mmio #(
     logic pending_write = 1'b0;
     logic pending_refresh = 1'b0;
     logic refresh_pending = 1'b0;
+    logic refresh_cmd_active = 1'b0;
     logic op_done = 1'b0;
     logic op_error = 1'b0;
     logic [31:0] refresh_counter = 32'd0;
@@ -109,6 +110,7 @@ module darkddr3_mmio #(
             pending_write <= 1'b0;
             pending_refresh <= 1'b0;
             refresh_pending <= 1'b0;
+            refresh_cmd_active <= 1'b0;
             op_done <= 1'b0;
             op_error <= 1'b0;
             refresh_counter <= 32'd0;
@@ -172,6 +174,7 @@ module darkddr3_mmio #(
                     if (init_done && !ddr_busy) begin
                         if (refresh_pending || pending_refresh) begin
                             ddr_refresh <= 1'b1;
+                            refresh_cmd_active <= pending_refresh;
                             refresh_pending <= 1'b0;
                             pending_refresh <= 1'b0;
                             state <= ST_REFRESH_WAIT;
@@ -238,6 +241,10 @@ module darkddr3_mmio #(
                 ST_REFRESH_WAIT: begin
                     if (!ddr_busy) begin
                         refresh_count <= refresh_count + 1'b1;
+                        if (refresh_cmd_active) begin
+                            op_done <= 1'b1;
+                            refresh_cmd_active <= 1'b0;
+                        end
                         state <= ST_IDLE;
                     end
                 end

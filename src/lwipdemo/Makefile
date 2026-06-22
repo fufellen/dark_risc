@@ -11,6 +11,14 @@ override CFLAGS := -I. -Iarch -I$(LWIPDIR)/include $(CFLAGS)
 override CFLAGS += -Wno-incompatible-pointer-types -Wno-discarded-qualifiers
 override CFLAGS += -Wno-builtin-declaration-mismatch -Wno-implicit-function-declaration
 
+ifdef LIDARSIM_DDR3_DIAG
+override CFLAGS += -DLIDARSIM_DDR3_DIAG=1 -DDARKDDR3_BASE=0xc0000000u
+endif
+
+ifdef LIDARSIM_DDR3_TIMEOUT
+override CFLAGS += -DLIDARSIM_DDR3_TIMEOUT=$(LIDARSIM_DDR3_TIMEOUT)
+endif
+
 LWIP_OBJS = \
     init.o \
     def.o \
