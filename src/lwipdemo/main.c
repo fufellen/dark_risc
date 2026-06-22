@@ -149,6 +149,7 @@
 #define FW_FLASH_BLOCK_SIZE         65536u
 #define FW_FLASH_PAGE_SIZE          256u
 #define FW_FLASH_MAX_SIZE           (16u * 1024u * 1024u)
+#define FW_FLASH_ERASE_PROGRESS_STEP 5u
 
 #define SPIBB_MOSI                  0x00000001u
 #define SPIBB_SCK                   0x00000002u
@@ -1128,9 +1129,16 @@ static unsigned flash_read_status(void)
 static unsigned flash_wait_ready(unsigned timeout_ms)
 {
     unsigned start = sys_now();
+    unsigned polls = 0;
+    unsigned max_polls = timeout_ms * 200u + 1000u;
+
     do {
         if ((flash_read_status() & 0x01u) == 0u) {
             return 1;
+        }
+        polls++;
+        if (polls > max_polls) {
+            return 0;
         }
     } while ((sys_now() - start) < timeout_ms);
     return 0;
@@ -1375,27 +1383,19 @@ static unsigned firmware_flash_erase(struct FIRMWARE_CONN *conn,
     }
 
     while (addr < erase_size) {
-        unsigned remaining = erase_size - addr;
-        unsigned step;
-        unsigned ok;
-
-        if ((addr & (FW_FLASH_BLOCK_SIZE - 1u)) == 0u &&
-            remaining >= FW_FLASH_BLOCK_SIZE) {
-            step = FW_FLASH_BLOCK_SIZE;
-            ok = flash_erase_cmd(0xd8u, addr, 3000u);
-        } else {
-            step = FW_FLASH_SECTOR_SIZE;
-            ok = flash_erase_cmd(0x20u, addr, 1000u);
-        }
+        unsigned step = FW_FLASH_SECTOR_SIZE;
+        unsigned ok = flash_erase_cmd(0x20u, addr, 5000u);
 
         if (!ok) {
+            printf("fwloader erase fail addr=%x\n", addr);
             return 0;
         }
 
         addr += step;
         unsigned percent = (addr >= erase_size) ? 100u :
             ((addr * 100u) / erase_size);
-        if (percent != last_percent) {
+        if (last_percent == 101u || percent == 100u ||
+            percent >= last_percent + FW_FLASH_ERASE_PROGRESS_STEP) {
             firmware_send_status(conn, pkt_num, FW_CMD_CPU_PRG_BEGIN,
                                  FW_STATUS_ERASE_PERCENT, percent, 1);
             last_percent = percent;
