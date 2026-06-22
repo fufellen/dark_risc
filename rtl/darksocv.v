@@ -405,7 +405,9 @@ module darksocv
 
 `ifdef DARKDDR3_MMIO
 
-    darkddr3_mmio ddr30
+    darkddr3_mmio #(
+        .REFRESH_INTERVAL_CYCLES(`BOARD_CK / 128000)
+    ) ddr30
     (
         .CLK                    (CLK),
         .RES                    (RES),

@@ -82,6 +82,7 @@ module darkddr3_mmio #(
     wire write_start = XDREQ && XWR;
     wire [3:0] reg_addr = XADDR[5:2];
     wire pending_any = pending_read || pending_write || pending_refresh;
+    wire state_accepts_start = (state == ST_IDLE) || (state == ST_REFRESH_WAIT);
 
     assign XDACK = (dtack == 1) || write_start;
 
@@ -147,7 +148,7 @@ module darkddr3_mmio #(
                         end
 
                         if ((XATAI & (CTRL_START_READ | CTRL_START_WRITE | CTRL_START_REFRESH)) != 0) begin
-                            if (!init_done || (state != ST_IDLE) || pending_any) begin
+                            if (!init_done || !state_accepts_start || pending_any) begin
                                 op_error <= 1'b1;
                             end else if ((XATAI & CTRL_START_READ) != 0) begin
                                 pending_read <= 1'b1;

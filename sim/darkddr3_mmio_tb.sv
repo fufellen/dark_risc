@@ -128,7 +128,7 @@ module darkddr3_mmio_tb;
 
             if (ddr_refresh) begin
                 ddr_busy <= 1'b1;
-                busy_count <= 2;
+                busy_count <= 8;
             end
         end
     end
@@ -235,6 +235,17 @@ module darkddr3_mmio_tb;
                     "manual refresh done");
         mmio_read(REG_REFRESH_COUNT, data);
         check_equal(data, 32'd1, "refresh count");
+
+        mmio_write(REG_CTRL, CTRL_CLEAR_DONE | CTRL_CLEAR_ERROR);
+        mmio_write(REG_CTRL, CTRL_START_REFRESH);
+        mmio_write(REG_ADDR, 32'h0000_0030);
+        mmio_write(REG_WDATA, 32'hcafe_babe);
+        mmio_write(REG_CTRL, CTRL_START_WRITE);
+        wait_status(STATUS_OP_DONE | STATUS_OP_BUSY | STATUS_OP_ERROR,
+                    STATUS_OP_DONE,
+                    "write queued during refresh");
+        check_equal({16'd0, mem[8'h30]}, 32'h0000_babe, "queued write lower half");
+        check_equal({16'd0, mem[8'h31]}, 32'h0000_cafe, "queued write upper half");
 
         $display("TEST PASS: darkddr3_mmio");
         $finish;

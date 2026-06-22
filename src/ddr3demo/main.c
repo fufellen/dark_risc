@@ -136,14 +136,19 @@ int main(void)
         return 1;
     }
 
+    if (ddr3_write32(0x40, 0xa5a55a5au)) {
+        printf(">");
+        return 1;
+    }
+
     if (ddr3_read32(0x40, &data)) {
         printf(">");
         return 1;
     }
 
-    printf("ddr3demo preload addr=40 data=%x\n", data);
-    if (data != 0xabcd1234u) {
-        printf("ddr3demo preload mismatch actual=%x\n", data);
+    printf("ddr3demo rw addr=40 data=%x\n", data);
+    if (data != 0xa5a55a5au) {
+        printf("ddr3demo mismatch expected=a5a55a5a actual=%x\n", data);
         printf(">");
         return 1;
     }
