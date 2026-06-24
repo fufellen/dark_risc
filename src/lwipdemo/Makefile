@@ -4,7 +4,7 @@ include ../config.mk
 
 PROJ = lwipdemo
 
-LWIP_ROOT ?= C:/workspace/Ethernet/lwip
+LWIP_ROOT ?= ../../../../third_party/lwip
 LWIPDIR = $(LWIP_ROOT)/src
 
 override CFLAGS := -I. -Iarch -I$(LWIPDIR)/include $(CFLAGS)
