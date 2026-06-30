@@ -197,6 +197,9 @@
 #else
 #define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER)
 #endif
+#if defined(LIDARSIM_PSRAM_TCP_SIM_SELFTEST) && !defined(LIDARSIM_PSRAM_TCP_SIM_FRAMES)
+#define LIDARSIM_PSRAM_TCP_SIM_FRAMES 3u
+#endif
 
 struct DARKETH {
     unsigned status;
@@ -313,6 +316,9 @@ static unsigned psram_msop_count;
 static unsigned psram_msop_len[LIDARSIM_MSOP_TX_BUFFERS];
 static unsigned char psram_msop_build_buf[LIDARSIM_MSOP_PACKET_MAX];
 static unsigned char psram_msop_stage_buf[LIDARSIM_MSOP_PACKET_MAX];
+#ifdef LIDARSIM_PSRAM_TCP_SIM_SELFTEST
+static unsigned psram_tcp_sim_frames_seen;
+#endif
 #endif
 static unsigned target_speed_bits = 0x41a00000u;
 static unsigned voltage_ld = 27u;
@@ -2336,6 +2342,9 @@ static void msop_tx_reset(void)
     for (unsigned i = 0; i < LIDARSIM_MSOP_TX_BUFFERS; i++) {
         psram_msop_len[i] = 0;
     }
+#ifdef LIDARSIM_PSRAM_TCP_SIM_SELFTEST
+    psram_tcp_sim_frames_seen = 0;
+#endif
 #endif
 }
 
@@ -2768,10 +2777,17 @@ static void service_msop_tcp(void)
             psram_msop_stage_buf[1] == 0xfeu &&
             psram_msop_stage_buf[len - 2u] == 0xffu &&
             psram_msop_stage_buf[len - 1u] == 0x9bu) {
-            sim_progress_flags |= SIM_FLAG_TCP_DATA;
-            printf("lidarsim psram tcp msop ok len=%x slot=%x ops=%x\n",
-                   len, slot, psram->op_count);
-            maybe_report_sim_ok();
+            if (psram_tcp_sim_frames_seen < LIDARSIM_PSRAM_TCP_SIM_FRAMES) {
+                psram_tcp_sim_frames_seen++;
+                printf("lidarsim psram tcp msop frame ok count=%x len=%x slot=%x ops=%x\n",
+                       psram_tcp_sim_frames_seen, len, slot, psram->op_count);
+                if (psram_tcp_sim_frames_seen >= LIDARSIM_PSRAM_TCP_SIM_FRAMES) {
+                    sim_progress_flags |= SIM_FLAG_TCP_DATA;
+                    printf("lidarsim psram tcp msop ok len=%x frames=%x slot=%x ops=%x\n",
+                           len, psram_tcp_sim_frames_seen, slot, psram->op_count);
+                    maybe_report_sim_ok();
+                }
+            }
         }
 #endif
         psram_msop_len[slot] = 0;

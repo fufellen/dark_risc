@@ -146,6 +146,8 @@ module darksimv;
     endtask
 
 `ifdef DARKETH_LWIP_TCP_DATA_FRAME
+    localparam integer TCP_DATA_MSOP_TARGET_FRAMES = 3;
+    localparam integer TCP_DATA_MSOP_FRAME_BYTES = 758;
     reg [7:0] eth_tx_capture [0:1599];
     integer eth_tx_len = 0;
     reg tcp_data_synack_seen = 0;
@@ -154,6 +156,8 @@ module darksimv;
     reg [7:0] tcp_data_msop_capture [0:1023];
     integer tcp_data_msop_len = 0;
     integer tcp_data_msop_segments = 0;
+    integer tcp_data_msop_frame_segments = 0;
+    integer tcp_data_msop_frame_count = 0;
     reg tcp_data_msop_seen = 0;
     integer tcp_data_ip_header_len = 0;
     integer tcp_data_tcp_header_len = 0;
@@ -161,6 +165,10 @@ module darksimv;
     integer tcp_data_payload_offset = 0;
     integer tcp_data_payload_len = 0;
     integer tcp_data_payload_idx = 0;
+    reg [31:0] tcp_data_tx_seq = 0;
+    reg [31:0] tcp_data_ack_value = 0;
+    reg tcp_data_ack_request = 0;
+    reg tcp_data_ack_sender_busy = 0;
 
     task tcp_data_fail(input [1023:0] message);
     begin
@@ -171,11 +179,17 @@ module darksimv;
 
     task tcp_data_check_msop_payload;
     begin
+        if (tcp_data_msop_frame_count >= TCP_DATA_MSOP_TARGET_FRAMES) begin
+            tcp_data_fail("unexpected extra msop frame");
+        end
+
         if (tcp_data_msop_capture[0] !== 8'hff ||
             tcp_data_msop_capture[1] !== 8'hfe ||
             tcp_data_msop_capture[2] !== 8'h01 ||
             tcp_data_msop_capture[3] !== 8'h01 ||
             tcp_data_msop_capture[4] !== 8'h00 ||
+            tcp_data_msop_capture[5] !== (tcp_data_msop_frame_count & 8'hff) ||
+            tcp_data_msop_capture[6] !== ((tcp_data_msop_frame_count >> 8) & 8'hff) ||
             tcp_data_msop_capture[7] !== 8'hb4 ||
             tcp_data_msop_capture[8] !== 8'h00 ||
             tcp_data_msop_capture[17] !== 8'h00 ||
@@ -197,14 +211,25 @@ module darksimv;
             tcp_data_msop_capture[33] !== 8'h00 ||
             tcp_data_msop_capture[34] !== 8'h03 ||
             tcp_data_msop_capture[35] !== 8'h02 ||
-            tcp_data_msop_capture[756] !== 8'hff ||
-            tcp_data_msop_capture[757] !== 8'h9b) begin
+            tcp_data_msop_capture[TCP_DATA_MSOP_FRAME_BYTES - 2] !== 8'hff ||
+            tcp_data_msop_capture[TCP_DATA_MSOP_FRAME_BYTES - 1] !== 8'h9b) begin
             tcp_data_fail("msop payload format mismatch");
         end
 
-        tcp_data_msop_seen = 1'b1;
-        $display("darketh sim tcp data msop payload ok len=%04x segments=%0d",
-                 tcp_data_msop_len[15:0], tcp_data_msop_segments);
+        tcp_data_msop_frame_count = tcp_data_msop_frame_count + 1;
+        $display("darketh sim tcp data msop frame ok count=%0d len=%04x frame=%0d segments=%0d",
+                 tcp_data_msop_frame_count, tcp_data_msop_len[15:0],
+                 tcp_data_msop_frame_count - 1, tcp_data_msop_frame_segments);
+
+        if (tcp_data_msop_frame_count >= TCP_DATA_MSOP_TARGET_FRAMES) begin
+            tcp_data_msop_seen = 1'b1;
+            $display("darketh sim tcp data msop payload ok len=%04x frames=%0d segments=%0d",
+                     tcp_data_msop_len[15:0], tcp_data_msop_frame_count,
+                     tcp_data_msop_segments);
+        end
+
+        tcp_data_msop_len = 0;
+        tcp_data_msop_frame_segments = 0;
     end
     endtask
 
@@ -273,6 +298,20 @@ module darksimv;
         $display("darketh sim tcp data ack consumed");
     end
     endtask
+
+    initial
+    begin
+        forever begin
+            wait(tcp_data_ack_request);
+            tcp_data_ack_sender_busy = 1'b1;
+            tcp_data_ack_request = 1'b0;
+            #100_000;
+            eth_send_tcp_data_segment(32'h01020305, tcp_data_ack_value, 8'h10);
+            $display("darketh sim tcp data payload ack=%x consumed",
+                     tcp_data_ack_value);
+            tcp_data_ack_sender_busy = 1'b0;
+        end
+    end
 `endif
 
 `ifdef DARKETH_LWIP_FRAME
@@ -697,12 +736,21 @@ module darksimv;
                        eth_tx_capture[14 + tcp_data_ip_header_len + 1] == 8'hb4 &&
                        eth_tx_capture[14 + tcp_data_ip_header_len + 2] == 8'h9c &&
                        eth_tx_capture[14 + tcp_data_ip_header_len + 3] == 8'h40) begin
+                        tcp_data_tx_seq = {
+                            eth_tx_capture[14 + tcp_data_ip_header_len + 4],
+                            eth_tx_capture[14 + tcp_data_ip_header_len + 5],
+                            eth_tx_capture[14 + tcp_data_ip_header_len + 6],
+                            eth_tx_capture[14 + tcp_data_ip_header_len + 7]
+                        };
+                        tcp_data_ack_value = tcp_data_tx_seq + tcp_data_payload_len;
+                        tcp_data_ack_request = 1'b1;
                         tcp_data_msop_segments = tcp_data_msop_segments + 1;
+                        tcp_data_msop_frame_segments = tcp_data_msop_frame_segments + 1;
 
                         for(tcp_data_payload_idx = 0;
                             tcp_data_payload_idx < tcp_data_payload_len;
                             tcp_data_payload_idx = tcp_data_payload_idx + 1) begin
-                            if(tcp_data_msop_len >= 758) begin
+                            if(tcp_data_msop_len >= TCP_DATA_MSOP_FRAME_BYTES) begin
                                 tcp_data_fail("msop payload too long");
                             end
                             tcp_data_msop_capture[tcp_data_msop_len] =
@@ -710,7 +758,7 @@ module darksimv;
                             tcp_data_msop_len = tcp_data_msop_len + 1;
                         end
 
-                        if(tcp_data_msop_len == 758) begin
+                        if(tcp_data_msop_len == TCP_DATA_MSOP_FRAME_BYTES) begin
                             tcp_data_check_msop_payload();
                         end
                     end
