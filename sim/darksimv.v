@@ -146,7 +146,11 @@ module darksimv;
     endtask
 
 `ifdef DARKETH_LWIP_TCP_DATA_FRAME
+`ifdef DARKETH_LWIP_TCP_DATA_TARGET_FRAMES
+    localparam integer TCP_DATA_MSOP_TARGET_FRAMES = `DARKETH_LWIP_TCP_DATA_TARGET_FRAMES;
+`else
     localparam integer TCP_DATA_MSOP_TARGET_FRAMES = 3;
+`endif
     localparam integer TCP_DATA_MSOP_FRAME_BYTES = 758;
     reg [7:0] eth_tx_capture [0:1599];
     integer eth_tx_len = 0;
