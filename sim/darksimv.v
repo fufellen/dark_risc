@@ -321,16 +321,26 @@ module darksimv;
 `endif
 
 `ifdef DARKETH_LWIP_FRAME
+`ifdef DARKPSRAM_MMIO
+`ifdef DARKETH_LWIP_TCP_DATA_FRAME
+    localparam integer DARKETH_LWIP_SIM_TIMEOUT_NS =
+        200_000_000 + ((TCP_DATA_MSOP_TARGET_FRAMES > 5) ?
+                       ((TCP_DATA_MSOP_TARGET_FRAMES - 5) * 25_000_000) :
+                       0);
+`else
+    localparam integer DARKETH_LWIP_SIM_TIMEOUT_NS = 200_000_000;
+`endif
+`else
+    localparam integer DARKETH_LWIP_SIM_TIMEOUT_NS = 30_000_000;
+`endif
+
     initial
     begin
         wait(RES == 0);
-`ifdef DARKPSRAM_MMIO
-        #200_000_000;
-`else
-        #30_000_000;
-`endif
-        $display("FAIL darketh lwip sim timeout ready=%b available=%b",
-                 ETH_RX_READY_FOR_FRAME, ETH_RX_FRAME_AVAILABLE);
+        #DARKETH_LWIP_SIM_TIMEOUT_NS;
+        $display("FAIL darketh lwip sim timeout timeout_ns=%0d ready=%b available=%b",
+                 DARKETH_LWIP_SIM_TIMEOUT_NS, ETH_RX_READY_FOR_FRAME,
+                 ETH_RX_FRAME_AVAILABLE);
         $fatal;
     end
 `endif
