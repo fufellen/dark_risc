@@ -220,6 +220,8 @@ module darksimv;
             tcp_data_fail("msop payload format mismatch");
         end
 
+        $display("darketh sim tcp data msop header ok points=180 angle_res=2000 dist_bytes=2 echo=3/2");
+
         tcp_data_msop_frame_count = tcp_data_msop_frame_count + 1;
         $display("darketh sim tcp data msop frame ok count=%0d len=%04x frame=%0d segments=%0d",
                  tcp_data_msop_frame_count, tcp_data_msop_len[15:0],
