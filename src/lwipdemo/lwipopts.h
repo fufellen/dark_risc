@@ -34,7 +34,7 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
 #define MEM_ALIGNMENT                   4
-#ifdef LIDARSIM_DDR3_DIAG
+#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define MEM_SIZE                        1024
 #else
 #define MEM_SIZE                        2048
@@ -47,7 +47,7 @@
 #define MEMP_NUM_UDP_PCB                3
 #define MEMP_NUM_TCP_PCB                4
 #define MEMP_NUM_TCP_PCB_LISTEN         3
-#ifdef LIDARSIM_DDR3_DIAG
+#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define MEMP_NUM_TCP_SEG                6
 #else
 #define MEMP_NUM_TCP_SEG                8
@@ -57,7 +57,7 @@
 #define MEMP_NUM_NETCONN                0
 #define MEMP_NUM_TCPIP_MSG_API          0
 #define MEMP_NUM_TCPIP_MSG_INPKT        0
-#ifdef LIDARSIM_DDR3_DIAG
+#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define PBUF_POOL_SIZE                  4
 #else
 #define PBUF_POOL_SIZE                  6
@@ -65,12 +65,12 @@
 #define PBUF_POOL_BUFSIZE               256
 
 #define TCP_MSS                         512
-#ifdef LIDARSIM_DDR3_DIAG
+#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define TCP_WND                         TCP_MSS
 #else
 #define TCP_WND                         (2 * TCP_MSS)
 #endif
-#ifdef LIDARSIM_DDR3_DIAG
+#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define TCP_SND_BUF                     (2 * TCP_MSS)
 #define TCP_SND_QUEUELEN                6
 #else

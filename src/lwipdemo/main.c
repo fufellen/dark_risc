@@ -104,8 +104,8 @@
 #define LIDARSIM_FIRMWARE_BUF_MAX 160u
 #elif defined(LIDARSIM_PSRAM_MMIO)
 #define LIDARSIM_MSOP_TX_BUFFERS  4u
-#define LIDARSIM_CONTROL_BUF_MAX  160u
-#define LIDARSIM_CONTROL_REPLY_MAX 160u
+#define LIDARSIM_CONTROL_BUF_MAX  80u
+#define LIDARSIM_CONTROL_REPLY_MAX 80u
 #define LIDARSIM_FIRMWARE_BUF_MAX 160u
 #else
 #define LIDARSIM_MSOP_TX_BUFFERS  2u
@@ -293,7 +293,10 @@ static unsigned msop_tx_head;
 static unsigned msop_tx_tail;
 static unsigned msop_tx_inflight;
 static unsigned msop_nocopy_unacked_bytes[LIDARSIM_MSOP_TX_BUFFERS];
+static unsigned debug_leds_last_ms;
 #ifdef LIDARSIM_PSRAM_MMIO
+static int psram_available;
+static unsigned psram_retry_ms;
 static unsigned psram_msop_head;
 static unsigned psram_msop_tail;
 static unsigned psram_msop_count;
@@ -330,6 +333,40 @@ static struct LIDARSIM_CONFIG runtime_config = {
 u32_t sys_now(void)
 {
     return io->timeus / 1000u;
+}
+
+#define DEBUG_LED_CPU_ALIVE 0x1u
+#define DEBUG_LED_NETIF_UP  0x2u
+#define DEBUG_LED_PSRAM_OK  0x4u
+#define DEBUG_LED_TCP_DATA  0x8u
+
+static void service_debug_leds(void)
+{
+    unsigned now = sys_now();
+    unsigned leds = 0;
+
+    if ((now - debug_leds_last_ms) >= 100u) {
+        debug_leds_last_ms = now;
+    }
+
+    if ((debug_leds_last_ms / 100u) & 1u) {
+        leds |= DEBUG_LED_CPU_ALIVE;
+    }
+    if (netif_configured) {
+        leds |= DEBUG_LED_NETIF_UP;
+    }
+#ifdef LIDARSIM_PSRAM_MMIO
+    if (psram_available) {
+        leds |= DEBUG_LED_PSRAM_OK;
+    }
+#else
+    leds |= DEBUG_LED_PSRAM_OK;
+#endif
+    if (tcp_data_client) {
+        leds |= DEBUG_LED_TCP_DATA;
+    }
+
+    io->led = leds;
 }
 
 static void write_le16(unsigned char *dst, unsigned value)
@@ -1844,6 +1881,11 @@ static void firmware_selftest(void)
         return;
     }
 
+#if LIDARSIM_FIRMWARE_BUF_MAX < FW_FLASH_PAGE_SIZE
+    printf("fwloader sim skip buf=%d page=%d\n",
+           LIDARSIM_FIRMWARE_BUF_MAX, FW_FLASH_PAGE_SIZE);
+    return;
+#else
     unsigned char *buf = tcp_firmware.buf;
 
     unsigned crc_state = 0xffffffffu;
@@ -1885,6 +1927,7 @@ static void firmware_selftest(void)
     }
 
     printf("fwloader sim fail status=%d\n", st);
+#endif
 }
 
 static void process_control_packet_tcp(struct tcp_pcb *pcb,
@@ -2589,11 +2632,24 @@ static unsigned build_msop_packet(unsigned char *out)
 static void service_msop_tcp(void)
 {
 #ifdef LIDARSIM_PSRAM_MMIO
+    unsigned now = sys_now();
+
     if (!tcp_data_client) {
         return;
     }
 
-    unsigned now = sys_now();
+    if (!psram_available) {
+        if (!psram_retry_ms || ((now - psram_retry_ms) >= 1000u)) {
+            psram_retry_ms = now;
+            if (lidarsim_psram_diag() == 0) {
+                psram_available = 1;
+                msop_tx_reset();
+                printf("lidarsim psram recovered\n");
+            }
+        }
+        return;
+    }
+
     if ((psram_msop_count < LIDARSIM_MSOP_TX_BUFFERS) &&
         (!last_msop_ms || ((now - last_msop_ms) >= LIDARSIM_MSOP_PERIOD_MS))) {
         unsigned slot = psram_msop_head;
@@ -2834,7 +2890,12 @@ static void handle_uart_command(char *line)
 #endif
 #ifdef LIDARSIM_PSRAM_MMIO
     if (command_is(line, "psram")) {
-        (void)lidarsim_psram_diag();
+        psram_available = (lidarsim_psram_diag() == 0);
+        psram_retry_ms = sys_now();
+        if (!psram_available) {
+            printf("lidarsim psram unavailable\n");
+        }
+        msop_tx_reset();
         return;
     }
 #endif
@@ -2955,6 +3016,7 @@ int main(void)
     ip4_addr_t netmask;
     ip4_addr_t gw;
 
+    io->led = DEBUG_LED_CPU_ALIVE;
     printf("lidarsim start\n");
 
     lwip_init();
@@ -2967,10 +3029,9 @@ int main(void)
     }
 #endif
 #ifdef LIDARSIM_PSRAM_MMIO
-    if (lidarsim_psram_diag()) {
-        printf(">");
-        return 1;
-    }
+    psram_available = 0;
+    psram_retry_ms = 0;
+    printf("lidarsim psram diag deferred until TCP data client\n");
 #endif
 
     ip4_from_config(&ipaddr, runtime_config.ip);
@@ -2988,6 +3049,7 @@ int main(void)
     netif_set_default(&fpga_netif);
     netif_set_up(&fpga_netif);
     netif_set_link_up(&fpga_netif);
+    service_debug_leds();
 
     err_t err = udp_listener_init(&udp_discovery_listener,
                                   runtime_config.discovery_port,
@@ -3036,6 +3098,7 @@ int main(void)
     }
 
     while (1) {
+        service_debug_leds();
         poll_uart_config();
         service_pending_network_reconfig();
         poll_rx_frame();
