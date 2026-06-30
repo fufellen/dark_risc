@@ -151,6 +151,62 @@ module darksimv;
     reg tcp_data_synack_seen = 0;
     reg [31:0] tcp_data_server_iss = 0;
     integer tcp_data_ip_id = 16'h0100;
+    reg [7:0] tcp_data_msop_capture [0:1023];
+    integer tcp_data_msop_len = 0;
+    integer tcp_data_msop_segments = 0;
+    reg tcp_data_msop_seen = 0;
+    integer tcp_data_ip_header_len = 0;
+    integer tcp_data_tcp_header_len = 0;
+    integer tcp_data_ip_total_len = 0;
+    integer tcp_data_payload_offset = 0;
+    integer tcp_data_payload_len = 0;
+    integer tcp_data_payload_idx = 0;
+
+    task tcp_data_fail(input [1023:0] message);
+    begin
+        $display("FAIL darketh sim tcp data %0s", message);
+        $fatal;
+    end
+    endtask
+
+    task tcp_data_check_msop_payload;
+    begin
+        if (tcp_data_msop_capture[0] !== 8'hff ||
+            tcp_data_msop_capture[1] !== 8'hfe ||
+            tcp_data_msop_capture[2] !== 8'h01 ||
+            tcp_data_msop_capture[3] !== 8'h01 ||
+            tcp_data_msop_capture[4] !== 8'h00 ||
+            tcp_data_msop_capture[7] !== 8'hb4 ||
+            tcp_data_msop_capture[8] !== 8'h00 ||
+            tcp_data_msop_capture[17] !== 8'h00 ||
+            tcp_data_msop_capture[18] !== 8'h00 ||
+            tcp_data_msop_capture[19] !== 8'h00 ||
+            tcp_data_msop_capture[20] !== 8'h00 ||
+            tcp_data_msop_capture[21] !== 8'h01 ||
+            tcp_data_msop_capture[22] !== 8'h90 ||
+            tcp_data_msop_capture[23] !== 8'hd0 ||
+            tcp_data_msop_capture[24] !== 8'h03 ||
+            tcp_data_msop_capture[25] !== 8'h00 ||
+            tcp_data_msop_capture[26] !== 8'h40 ||
+            tcp_data_msop_capture[27] !== 8'h7e ||
+            tcp_data_msop_capture[28] !== 8'h05 ||
+            tcp_data_msop_capture[29] !== 8'h00 ||
+            tcp_data_msop_capture[30] !== 8'hd0 ||
+            tcp_data_msop_capture[31] !== 8'h07 ||
+            tcp_data_msop_capture[32] !== 8'h02 ||
+            tcp_data_msop_capture[33] !== 8'h00 ||
+            tcp_data_msop_capture[34] !== 8'h03 ||
+            tcp_data_msop_capture[35] !== 8'h02 ||
+            tcp_data_msop_capture[756] !== 8'hff ||
+            tcp_data_msop_capture[757] !== 8'h9b) begin
+            tcp_data_fail("msop payload format mismatch");
+        end
+
+        tcp_data_msop_seen = 1'b1;
+        $display("darketh sim tcp data msop payload ok len=%04x segments=%0d",
+                 tcp_data_msop_len[15:0], tcp_data_msop_segments);
+    end
+    endtask
 
     task eth_send_tcp_data_segment(
         input [31:0] seq,
@@ -617,6 +673,47 @@ module darksimv;
                     tcp_data_synack_seen = 1'b1;
                     $display("darketh sim tcp data synack iss=%x",
                              tcp_data_server_iss);
+                end
+
+                if(!tcp_data_msop_seen &&
+                   eth_tx_len >= 54 &&
+                   eth_tx_capture[12] == 8'h08 &&
+                   eth_tx_capture[13] == 8'h00 &&
+                   eth_tx_capture[23] == 8'h06) begin
+                    tcp_data_ip_header_len = (eth_tx_capture[14] & 8'h0f) * 4;
+                    tcp_data_ip_total_len =
+                        (eth_tx_capture[16] * 256) + eth_tx_capture[17];
+                    tcp_data_tcp_header_len =
+                        (eth_tx_capture[14 + tcp_data_ip_header_len + 12] >> 4) * 4;
+                    tcp_data_payload_offset = 14 + tcp_data_ip_header_len +
+                                              tcp_data_tcp_header_len;
+                    tcp_data_payload_len = tcp_data_ip_total_len -
+                                           tcp_data_ip_header_len -
+                                           tcp_data_tcp_header_len;
+
+                    if(tcp_data_payload_len > 0 &&
+                       eth_tx_len >= (tcp_data_payload_offset + tcp_data_payload_len) &&
+                       eth_tx_capture[14 + tcp_data_ip_header_len] == 8'hc3 &&
+                       eth_tx_capture[14 + tcp_data_ip_header_len + 1] == 8'hb4 &&
+                       eth_tx_capture[14 + tcp_data_ip_header_len + 2] == 8'h9c &&
+                       eth_tx_capture[14 + tcp_data_ip_header_len + 3] == 8'h40) begin
+                        tcp_data_msop_segments = tcp_data_msop_segments + 1;
+
+                        for(tcp_data_payload_idx = 0;
+                            tcp_data_payload_idx < tcp_data_payload_len;
+                            tcp_data_payload_idx = tcp_data_payload_idx + 1) begin
+                            if(tcp_data_msop_len >= 758) begin
+                                tcp_data_fail("msop payload too long");
+                            end
+                            tcp_data_msop_capture[tcp_data_msop_len] =
+                                eth_tx_capture[tcp_data_payload_offset + tcp_data_payload_idx];
+                            tcp_data_msop_len = tcp_data_msop_len + 1;
+                        end
+
+                        if(tcp_data_msop_len == 758) begin
+                            tcp_data_check_msop_payload();
+                        end
+                    end
                 end
             end
 `endif
