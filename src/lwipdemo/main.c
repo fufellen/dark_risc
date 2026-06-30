@@ -18,8 +18,16 @@
 #define DARKDDR3_BASE 0xc0000000u
 #endif
 
+#ifndef DARKPSRAM_BASE
+#define DARKPSRAM_BASE 0xc0000000u
+#endif
+
 #ifndef LIDARSIM_DDR3_TIMEOUT
 #define LIDARSIM_DDR3_TIMEOUT 2000000u
+#endif
+
+#ifndef LIDARSIM_PSRAM_TIMEOUT
+#define LIDARSIM_PSRAM_TIMEOUT 2000000u
 #endif
 
 #define ETH_STATUS_RX_AVAILABLE 0x00000001u
@@ -58,6 +66,17 @@
 #define DDR3_CTRL_CLEAR_DONE        0x00000100u
 #define DDR3_CTRL_CLEAR_ERROR       0x00000200u
 
+#define PSRAM_STATUS_INIT_DONE      0x00000001u
+#define PSRAM_STATUS_OP_BUSY        0x00000010u
+#define PSRAM_STATUS_OP_DONE        0x00000020u
+#define PSRAM_STATUS_OP_ERROR       0x00000040u
+#define PSRAM_STATUS_READY_FOR_CMD  0x00000100u
+
+#define PSRAM_CTRL_START_READ       0x00000001u
+#define PSRAM_CTRL_START_WRITE      0x00000002u
+#define PSRAM_CTRL_CLEAR_DONE       0x00000100u
+#define PSRAM_CTRL_CLEAR_ERROR      0x00000200u
+
 #define LIDARSIM_MAX_FRAME        1518u
 #define LIDARSIM_UART_LINE_MAX    64u
 #define LIDARSIM_DISCOVERY_PORT   50103u
@@ -83,12 +102,19 @@
 #define LIDARSIM_CONTROL_BUF_MAX  160u
 #define LIDARSIM_CONTROL_REPLY_MAX 160u
 #define LIDARSIM_FIRMWARE_BUF_MAX 160u
+#elif defined(LIDARSIM_PSRAM_MMIO)
+#define LIDARSIM_MSOP_TX_BUFFERS  4u
+#define LIDARSIM_CONTROL_BUF_MAX  160u
+#define LIDARSIM_CONTROL_REPLY_MAX 160u
+#define LIDARSIM_FIRMWARE_BUF_MAX 160u
 #else
 #define LIDARSIM_MSOP_TX_BUFFERS  2u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
 #define LIDARSIM_FIRMWARE_BUF_MAX 320u
 #endif
+#define LIDARSIM_PSRAM_MSOP_BASE  0x00001000u
+#define LIDARSIM_PSRAM_MSOP_STRIDE 1024u
 #define LIDARSIM_PIG_PERIOD_MS    1500u
 
 #define LIDAR_DISCOVERY_RESPONSE_SIZE 80u
@@ -187,6 +213,18 @@ struct DARKDDR3 {
 };
 #endif
 
+#ifdef LIDARSIM_PSRAM_MMIO
+struct DARKPSRAM {
+    unsigned status;
+    unsigned addr;
+    unsigned wdata;
+    unsigned rdata;
+    unsigned ctrl;
+    unsigned id;
+    unsigned op_count;
+};
+#endif
+
 struct LIDARSIM_CONFIG {
     unsigned char mac[6];
     unsigned char ip[4];
@@ -232,6 +270,9 @@ static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
 #ifdef LIDARSIM_DDR3_DIAG
 static volatile struct DARKDDR3 *ddr3 = (volatile struct DARKDDR3 *)DARKDDR3_BASE;
 #endif
+#ifdef LIDARSIM_PSRAM_MMIO
+static volatile struct DARKPSRAM *psram = (volatile struct DARKPSRAM *)DARKPSRAM_BASE;
+#endif
 static struct netif fpga_netif;
 static struct udp_pcb *udp_discovery_listener;
 static struct udp_pcb *udp_command_listener;
@@ -252,6 +293,14 @@ static unsigned msop_tx_head;
 static unsigned msop_tx_tail;
 static unsigned msop_tx_inflight;
 static unsigned msop_nocopy_unacked_bytes[LIDARSIM_MSOP_TX_BUFFERS];
+#ifdef LIDARSIM_PSRAM_MMIO
+static unsigned psram_msop_head;
+static unsigned psram_msop_tail;
+static unsigned psram_msop_count;
+static unsigned psram_msop_len[LIDARSIM_MSOP_TX_BUFFERS];
+static unsigned char psram_msop_build_buf[LIDARSIM_MSOP_PACKET_MAX];
+static unsigned char psram_msop_stage_buf[LIDARSIM_MSOP_PACKET_MAX];
+#endif
 static unsigned target_speed_bits = 0x41a00000u;
 static unsigned voltage_ld = 27u;
 static unsigned voltage_pd = 150u;
@@ -496,6 +545,153 @@ static int lidarsim_ddr3_diag(void)
 
     refresh_after = ddr3->refresh_count;
     printf("lidarsim ddr3 ok refresh=%x to %x\n", refresh_before, refresh_after);
+    return 0;
+}
+#endif
+
+#ifdef LIDARSIM_PSRAM_MMIO
+static int psram_wait_status(unsigned mask, unsigned expected,
+                             unsigned timeout, const char *what)
+{
+    while (((psram->status & mask) != expected) && timeout) {
+        timeout--;
+    }
+
+    if (!timeout) {
+        printf("lidarsim psram timeout %s status=%x\n", what, psram->status);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int psram_clear_done(const char *what)
+{
+    psram->ctrl = PSRAM_CTRL_CLEAR_DONE | PSRAM_CTRL_CLEAR_ERROR;
+    return psram_wait_status(PSRAM_STATUS_OP_DONE | PSRAM_STATUS_OP_ERROR,
+                             0, LIDARSIM_PSRAM_TIMEOUT, what);
+}
+
+static int psram_write32(unsigned addr, unsigned data)
+{
+    if (psram_wait_status(PSRAM_STATUS_READY_FOR_CMD,
+                          PSRAM_STATUS_READY_FOR_CMD,
+                          LIDARSIM_PSRAM_TIMEOUT, "write-ready") ||
+        psram_clear_done("write-clear")) {
+        return -1;
+    }
+
+    psram->addr = addr;
+    psram->wdata = data;
+    psram->ctrl = PSRAM_CTRL_START_WRITE;
+
+    return psram_wait_status(PSRAM_STATUS_OP_DONE | PSRAM_STATUS_OP_BUSY,
+                             PSRAM_STATUS_OP_DONE, LIDARSIM_PSRAM_TIMEOUT,
+                             "write-done");
+}
+
+static int psram_read32(unsigned addr, unsigned *data)
+{
+    if (psram_wait_status(PSRAM_STATUS_READY_FOR_CMD,
+                          PSRAM_STATUS_READY_FOR_CMD,
+                          LIDARSIM_PSRAM_TIMEOUT, "read-ready") ||
+        psram_clear_done("read-clear")) {
+        return -1;
+    }
+
+    psram->addr = addr;
+    psram->ctrl = PSRAM_CTRL_START_READ;
+
+    if (psram_wait_status(PSRAM_STATUS_OP_DONE | PSRAM_STATUS_OP_BUSY,
+                          PSRAM_STATUS_OP_DONE, LIDARSIM_PSRAM_TIMEOUT,
+                          "read-done")) {
+        return -1;
+    }
+
+    *data = psram->rdata;
+    return 0;
+}
+
+static int psram_write_bytes(unsigned addr, const unsigned char *data,
+                             unsigned len)
+{
+    unsigned offset = 0;
+
+    while (offset < len) {
+        unsigned word = 0;
+
+        for (unsigned i = 0; i < 4u; i++) {
+            unsigned index = offset + i;
+            if (index < len) {
+                word |= ((unsigned)data[index]) << (8u * i);
+            }
+        }
+
+        if (psram_write32(addr + offset, word)) {
+            return -1;
+        }
+        offset += 4u;
+    }
+
+    return 0;
+}
+
+static int psram_read_bytes(unsigned addr, unsigned char *data, unsigned len)
+{
+    unsigned offset = 0;
+
+    while (offset < len) {
+        unsigned word = 0;
+
+        if (psram_read32(addr + offset, &word)) {
+            return -1;
+        }
+
+        for (unsigned i = 0; i < 4u; i++) {
+            unsigned index = offset + i;
+            if (index < len) {
+                data[index] = (unsigned char)(word >> (8u * i));
+            }
+        }
+        offset += 4u;
+    }
+
+    return 0;
+}
+
+static unsigned psram_msop_slot_addr(unsigned slot)
+{
+    return LIDARSIM_PSRAM_MSOP_BASE +
+           (slot * LIDARSIM_PSRAM_MSOP_STRIDE);
+}
+
+static int lidarsim_psram_diag(void)
+{
+    unsigned actual = 0;
+
+    printf("lidarsim psram status=%x id=%x base=%x\n",
+           psram->status, psram->id, DARKPSRAM_BASE);
+
+    if (psram_wait_status(PSRAM_STATUS_INIT_DONE |
+                          PSRAM_STATUS_READY_FOR_CMD,
+                          PSRAM_STATUS_INIT_DONE |
+                          PSRAM_STATUS_READY_FOR_CMD,
+                          LIDARSIM_PSRAM_TIMEOUT, "init")) {
+        return -1;
+    }
+
+    if (psram_write32(0x30u, 0x5a5ac33cu) ||
+        psram_read32(0x30u, &actual)) {
+        return -1;
+    }
+
+    if (actual != 0x5a5ac33cu) {
+        printf("lidarsim psram mismatch expected=5a5ac33c actual=%x\n",
+               actual);
+        return -1;
+    }
+
+    printf("lidarsim psram ok ops=%x\n", psram->op_count);
     return 0;
 }
 #endif
@@ -2076,6 +2272,14 @@ static void msop_tx_reset(void)
     for (unsigned i = 0; i < LIDARSIM_MSOP_TX_BUFFERS; i++) {
         msop_nocopy_unacked_bytes[i] = 0;
     }
+#ifdef LIDARSIM_PSRAM_MMIO
+    psram_msop_head = 0;
+    psram_msop_tail = 0;
+    psram_msop_count = 0;
+    for (unsigned i = 0; i < LIDARSIM_MSOP_TX_BUFFERS; i++) {
+        psram_msop_len[i] = 0;
+    }
+#endif
 }
 
 static void msop_tx_acked(unsigned len)
@@ -2384,6 +2588,60 @@ static unsigned build_msop_packet(unsigned char *out)
 
 static void service_msop_tcp(void)
 {
+#ifdef LIDARSIM_PSRAM_MMIO
+    if (!tcp_data_client) {
+        return;
+    }
+
+    unsigned now = sys_now();
+    if ((psram_msop_count < LIDARSIM_MSOP_TX_BUFFERS) &&
+        (!last_msop_ms || ((now - last_msop_ms) >= LIDARSIM_MSOP_PERIOD_MS))) {
+        unsigned slot = psram_msop_head;
+        unsigned len = build_msop_packet(psram_msop_build_buf);
+
+        if (psram_write_bytes(psram_msop_slot_addr(slot),
+                              psram_msop_build_buf, len) == 0) {
+            psram_msop_len[slot] = len;
+            psram_msop_head++;
+            if (psram_msop_head >= LIDARSIM_MSOP_TX_BUFFERS) {
+                psram_msop_head = 0;
+            }
+            psram_msop_count++;
+            msop_frame_num++;
+            last_msop_ms = now;
+        } else {
+            printf("lidarsim psram msop write fail\n");
+        }
+    }
+
+    if (!psram_msop_count) {
+        return;
+    }
+
+    unsigned slot = psram_msop_tail;
+    unsigned len = psram_msop_len[slot];
+    if (tcp_sndbuf(tcp_data_client) < len) {
+        return;
+    }
+
+    if (psram_read_bytes(psram_msop_slot_addr(slot),
+                         psram_msop_stage_buf, len)) {
+        printf("lidarsim psram msop read fail\n");
+        return;
+    }
+
+    err_t err = tcp_write(tcp_data_client, psram_msop_stage_buf,
+                          (u16_t)len, TCP_WRITE_FLAG_COPY);
+    if (err == ERR_OK) {
+        tcp_output(tcp_data_client);
+        psram_msop_len[slot] = 0;
+        psram_msop_tail++;
+        if (psram_msop_tail >= LIDARSIM_MSOP_TX_BUFFERS) {
+            psram_msop_tail = 0;
+        }
+        psram_msop_count--;
+    }
+#else
     static unsigned char packets[LIDARSIM_MSOP_TX_BUFFERS][LIDARSIM_MSOP_PACKET_MAX];
 
     if (!tcp_data_client) {
@@ -2420,6 +2678,7 @@ static void service_msop_tcp(void)
         }
         msop_tx_inflight++;
     }
+#endif
 }
 
 static int is_space(char c)
@@ -2573,6 +2832,12 @@ static void handle_uart_command(char *line)
         return;
     }
 #endif
+#ifdef LIDARSIM_PSRAM_MMIO
+    if (command_is(line, "psram")) {
+        (void)lidarsim_psram_diag();
+        return;
+    }
+#endif
 
     if (command_is(line, "mac")) {
         if (!parse_mac(arg, parsed_bytes)) {
@@ -2697,6 +2962,12 @@ int main(void)
     firmware_selftest();
 #ifdef LIDARSIM_DDR3_DIAG
     if (lidarsim_ddr3_diag()) {
+        printf(">");
+        return 1;
+    }
+#endif
+#ifdef LIDARSIM_PSRAM_MMIO
+    if (lidarsim_psram_diag()) {
         printf(">");
         return 1;
     }

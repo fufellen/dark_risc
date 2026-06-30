@@ -74,6 +74,13 @@ module darksocv
     input        DDR3_UI_WRITE_LEVEL_DONE,
     input        DDR3_UI_READ_CALIB_DONE,
 `endif
+`ifdef DARKPSRAM_MMIO
+    input  [3:0] PSRAM_DIN,
+    output [3:0] PSRAM_DOUT,
+    output [3:0] PSRAM_DOUTEN,
+    output       PSRAM_SCK,
+    output       PSRAM_CE_N,
+`endif
 
 `ifdef DARKETH_MMIO
 `ifdef DARKDDR3_MMIO
@@ -120,6 +127,7 @@ module darksocv
     wire spi_miso;  // SPI master data input, slave data output
     assign SPI_CSN = spi_csn;
     assign SPI_SCK = spi_sck;
+    assign spi_miso = SPI_MISO;
 `endif
     // clock and reset
 
@@ -488,7 +496,32 @@ module darksocv
 
 `endif
 
-    // unmapped area w/ CS==3, or DDR3 diagnostics when Ethernet already owns CS==2
+    // CS==3 external-memory diagnostics/buffer slot.
+
+`ifdef DARKPSRAM_MMIO
+
+    darkpsram_mmio psram0
+    (
+        .CLK                    (CLK),
+        .RES                    (RES),
+
+        .XDREQ                  (XDREQMUX[3]),
+        .XRD                    (XRD),
+        .XWR                    (XWR),
+        .XBE                    (XBE),
+        .XADDR                  (XADDR),
+        .XATAI                  (XATAO),
+        .XATAO                  (XATAIMUX[3]),
+        .XDACK                  (XDACKMUX[3]),
+
+        .psram_din              (PSRAM_DIN),
+        .psram_dout             (PSRAM_DOUT),
+        .psram_douten           (PSRAM_DOUTEN),
+        .psram_sck              (PSRAM_SCK),
+        .psram_ce_n             (PSRAM_CE_N)
+    );
+
+`else
 
 `ifdef DARKDDR3_MMIO_CS3
 
@@ -539,6 +572,8 @@ module darksocv
 
     assign XATAIMUX[3] = 32'hdeadbeef;
     assign XDACKMUX[3] = DTACK3==1;
+
+`endif
 
 `endif
 
