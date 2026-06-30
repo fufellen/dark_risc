@@ -133,7 +133,11 @@ module darksimv;
     initial
     begin
         wait(RES == 0);
+`ifdef DARKPSRAM_MMIO
+        #200_000_000;
+`else
         #30_000_000;
+`endif
         $display("FAIL darketh lwip sim timeout ready=%b available=%b",
                  ETH_RX_READY_FOR_FRAME, ETH_RX_FRAME_AVAILABLE);
         $fatal;
@@ -589,6 +593,29 @@ module darksimv;
     end
 `endif
 
+`ifdef DARKPSRAM_MMIO
+    wire [3:0] PSRAM_DIN;
+    wire [3:0] PSRAM_DOUT;
+    wire [3:0] PSRAM_DOUTEN;
+    wire       PSRAM_SCK;
+    wire       PSRAM_CE_N;
+    wire [3:0] PSRAM_SIO;
+
+    assign PSRAM_SIO[0] = PSRAM_DOUTEN[0] ? PSRAM_DOUT[0] : 1'bz;
+    assign PSRAM_SIO[1] = PSRAM_DOUTEN[1] ? PSRAM_DOUT[1] : 1'bz;
+    assign PSRAM_SIO[2] = PSRAM_DOUTEN[2] ? PSRAM_DOUT[2] : 1'bz;
+    assign PSRAM_SIO[3] = PSRAM_DOUTEN[3] ? PSRAM_DOUT[3] : 1'bz;
+    assign PSRAM_DIN = PSRAM_SIO;
+
+    is66wvs1m8_model #(
+        .ADDR_BITS(14)
+    ) psram_mock (
+        .ce_n(PSRAM_CE_N),
+        .sck(PSRAM_SCK),
+        .sio(PSRAM_SIO)
+    );
+`endif
+
 `ifdef __SDRAM__
 
     // sdram sim model!
@@ -646,6 +673,13 @@ module darksimv;
         .DDR3_UI_BUSY(DDR3_UI_BUSY),
         .DDR3_UI_WRITE_LEVEL_DONE(DDR3_UI_WRITE_LEVEL_DONE),
         .DDR3_UI_READ_CALIB_DONE(DDR3_UI_READ_CALIB_DONE),
+`endif
+`ifdef DARKPSRAM_MMIO
+        .PSRAM_DIN(PSRAM_DIN),
+        .PSRAM_DOUT(PSRAM_DOUT),
+        .PSRAM_DOUTEN(PSRAM_DOUTEN),
+        .PSRAM_SCK(PSRAM_SCK),
+        .PSRAM_CE_N(PSRAM_CE_N),
 `endif
 `ifdef __SDRAM__
         .S_CLK(S_CLK),

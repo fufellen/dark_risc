@@ -186,7 +186,12 @@
 #define SIM_FLAG_DISCOVERY          0x01u
 #define SIM_FLAG_CONTROL            0x02u
 #define SIM_FLAG_FWLOADER           0x04u
+#define SIM_FLAG_PSRAM              0x08u
+#ifdef LIDARSIM_PSRAM_SIM_SELFTEST
+#define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER | SIM_FLAG_PSRAM)
+#else
 #define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER)
+#endif
 
 struct DARKETH {
     unsigned status;
@@ -1884,6 +1889,10 @@ static void firmware_selftest(void)
 #if LIDARSIM_FIRMWARE_BUF_MAX < FW_FLASH_PAGE_SIZE
     printf("fwloader sim skip buf=%d page=%d\n",
            LIDARSIM_FIRMWARE_BUF_MAX, FW_FLASH_PAGE_SIZE);
+    if (sim_progress_flags != 0xffu) {
+        sim_progress_flags |= SIM_FLAG_FWLOADER;
+        maybe_report_sim_ok();
+    }
     return;
 #else
     unsigned char *buf = tcp_firmware.buf;
@@ -2629,6 +2638,63 @@ static unsigned build_msop_packet(unsigned char *out)
     return pos;
 }
 
+#if defined(LIDARSIM_PSRAM_MMIO) && defined(LIDARSIM_PSRAM_SIM_SELFTEST)
+static int lidarsim_psram_msop_selftest(void)
+{
+    unsigned total_ops_before;
+    unsigned total_ops_after;
+
+    if (lidarsim_psram_diag()) {
+        return -1;
+    }
+
+    total_ops_before = psram->op_count;
+
+    for (unsigned slot = 0; slot < LIDARSIM_MSOP_TX_BUFFERS; slot++) {
+        unsigned addr = psram_msop_slot_addr(slot);
+        unsigned len;
+
+        msop_frame_num = slot;
+        len = build_msop_packet(psram_msop_build_buf);
+
+        if (len != LIDARSIM_MSOP_PACKET_MAX ||
+            psram_msop_build_buf[0] != 0xffu ||
+            psram_msop_build_buf[1] != 0xfeu ||
+            psram_msop_build_buf[len - 2u] != 0xffu ||
+            psram_msop_build_buf[len - 1u] != 0x9bu) {
+            printf("lidarsim psram msop format fail slot=%x len=%x\n",
+                   slot, len);
+            return -1;
+        }
+
+        if (psram_write_bytes(addr, psram_msop_build_buf, len) ||
+            psram_read_bytes(addr, psram_msop_stage_buf, len)) {
+            printf("lidarsim psram msop io fail slot=%x len=%x\n",
+                   slot, len);
+            return -1;
+        }
+
+        for (unsigned i = 0; i < len; i++) {
+            if (psram_msop_stage_buf[i] != psram_msop_build_buf[i]) {
+                printf("lidarsim psram msop mismatch slot=%x off=%x exp=%x act=%x\n",
+                       slot, i, psram_msop_build_buf[i],
+                       psram_msop_stage_buf[i]);
+                return -1;
+            }
+        }
+    }
+
+    total_ops_after = psram->op_count;
+    msop_frame_num = 0;
+    msop_tx_reset();
+    sim_progress_flags |= SIM_FLAG_PSRAM;
+    printf("lidarsim psram msop selftest ok slots=%x len=%x ops=%x to %x\n",
+           LIDARSIM_MSOP_TX_BUFFERS, LIDARSIM_MSOP_PACKET_MAX,
+           total_ops_before, total_ops_after);
+    return 0;
+}
+#endif
+
 static void service_msop_tcp(void)
 {
 #ifdef LIDARSIM_PSRAM_MMIO
@@ -3031,7 +3097,16 @@ int main(void)
 #ifdef LIDARSIM_PSRAM_MMIO
     psram_available = 0;
     psram_retry_ms = 0;
+#ifdef LIDARSIM_PSRAM_SIM_SELFTEST
+    if (lidarsim_psram_msop_selftest()) {
+        printf(">");
+        return 1;
+    }
+    psram_available = 1;
+    psram_retry_ms = sys_now();
+#else
     printf("lidarsim psram diag deferred until TCP data client\n");
+#endif
 #endif
 
     ip4_from_config(&ipaddr, runtime_config.ip);

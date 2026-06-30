@@ -500,7 +500,15 @@ module darksocv
 
 `ifdef DARKPSRAM_MMIO
 
+`ifdef SIMULATION
+    darkpsram_mmio #(
+        .POWERUP_WAIT_CYCLES(64),
+        .RESET_WAIT_CYCLES(32),
+        .GAP_CYCLES(4)
+    ) psram0
+`else
     darkpsram_mmio psram0
+`endif
     (
         .CLK                    (CLK),
         .RES                    (RES),

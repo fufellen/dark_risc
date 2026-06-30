@@ -23,6 +23,7 @@ if {$script_file eq ""} {
 
 set script_dir [file normalize [file dirname $script_file]]
 set project_dir [file normalize [file join $script_dir ".."]]
+set repo_root [file normalize [file join $project_dir ".." ".."]]
 set sim_dir [file normalize [file join $project_dir "build" "modelsim" "darksimv" "run"]]
 set modelsim_ini [file join $sim_dir "modelsim.ini"]
 set transcript_file [file join $sim_dir "transcript"]
@@ -65,8 +66,11 @@ set rtl_files [list \
     [file join $project_dir "rtl" "darkio.v"] \
     [file join $project_dir "rtl" "darketh_mmio.sv"] \
     [file join $project_dir "rtl" "darkddr3_mmio.sv"] \
+    [file join $project_dir "rtl" "darkpsram_mmio.sv"] \
     [file join $project_dir "rtl" "darkcache.v"] \
     [file join $project_dir "rtl" "darkmac.v"] \
+    [file join $repo_root "src" "RAM" "is66wvs1m8" "EF_PSRAM_CTRL.v"] \
+    [file join $repo_root "src" "RAM" "is66wvs1m8" "is66wvs1m8_model.sv"] \
     [file join $project_dir "rtl" "lib" "sdram" "mt48lc16m16a2_ctrl.v"] \
 ]
 
