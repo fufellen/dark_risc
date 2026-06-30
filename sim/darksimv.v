@@ -129,6 +129,96 @@ module darksimv;
     end
     endtask
 
+    task eth_u16(input [15:0] data);
+    begin
+        eth_byte(data[15:8]);
+        eth_byte(data[7:0]);
+    end
+    endtask
+
+    task eth_u32(input [31:0] data);
+    begin
+        eth_byte(data[31:24]);
+        eth_byte(data[23:16]);
+        eth_byte(data[15:8]);
+        eth_byte(data[7:0]);
+    end
+    endtask
+
+`ifdef DARKETH_LWIP_TCP_DATA_FRAME
+    reg [7:0] eth_tx_capture [0:1599];
+    integer eth_tx_len = 0;
+    reg tcp_data_synack_seen = 0;
+    reg [31:0] tcp_data_server_iss = 0;
+    integer tcp_data_ip_id = 16'h0100;
+
+    task eth_send_tcp_data_segment(
+        input [31:0] seq,
+        input [31:0] ack,
+        input [7:0] flags
+    );
+    begin
+        eth_byte(8'h02);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h20);
+        eth_byte(8'h01);
+        eth_byte(8'h02);
+        eth_byte(8'haa);
+        eth_byte(8'hbb);
+        eth_byte(8'hcc);
+        eth_byte(8'hdd);
+        eth_byte(8'hee);
+        eth_u16(16'h0800);
+
+        eth_byte(8'h45);
+        eth_byte(8'h00);
+        eth_u16(16'd40);
+        eth_u16(tcp_data_ip_id[15:0]);
+        tcp_data_ip_id = tcp_data_ip_id + 1;
+        eth_u16(16'h0000);
+        eth_byte(8'h40);
+        eth_byte(8'h06);
+        eth_u16(16'h0000);
+        eth_u32(32'hc0a80f0d);
+        eth_u32(32'hc0a80f14);
+
+        eth_u16(16'd40000);
+        eth_u16(16'd50100);
+        eth_u32(seq);
+        eth_u32(ack);
+        eth_byte(8'h50);
+        eth_byte(flags);
+        eth_u16(16'h2000);
+        eth_u16(16'h0000);
+        eth_u16(16'h0000);
+
+        eth_commit_frame();
+        wait(ETH_RX_FRAME_AVAILABLE);
+        wait(ETH_RX_READY_FOR_FRAME);
+    end
+    endtask
+
+    task eth_send_tcp_data_syn;
+    begin
+        $display("darketh sim rx tcp data syn");
+        eth_send_tcp_data_segment(32'h01020304, 32'h00000000, 8'h02);
+        $display("darketh sim tcp data syn consumed");
+    end
+    endtask
+
+    task eth_send_tcp_data_ack;
+    begin
+        wait(tcp_data_synack_seen);
+        $display("darketh sim rx tcp data ack iss=%x", tcp_data_server_iss);
+        eth_send_tcp_data_segment(32'h01020305, tcp_data_server_iss + 32'd1,
+                                  8'h10);
+        $display("darketh sim tcp data ack consumed");
+    end
+    endtask
+`endif
+
 `ifdef DARKETH_LWIP_FRAME
     initial
     begin
@@ -468,6 +558,16 @@ module darksimv;
         eth_byte(8'hff);
         eth_byte(8'h9b);
         eth_commit_frame();
+`ifdef DARKETH_LWIP_TCP_DATA_FRAME
+        wait(ETH_RX_FRAME_AVAILABLE);
+        wait(ETH_RX_READY_FOR_FRAME);
+        $display("darketh sim full-status consumed");
+        #1_000_000;
+
+        eth_send_tcp_data_syn();
+        #200_000;
+        eth_send_tcp_data_ack();
+`endif
 `else
         eth_byte(8'hde);
         eth_byte(8'had);
@@ -486,6 +586,40 @@ module darksimv;
             if(ETH_TX_FRAME_START) $write("darketh tx data=");
             $write("%x",ETH_TX_BYTE);
             if(ETH_TX_FRAME_END) $display("");
+`ifdef DARKETH_LWIP_TCP_DATA_FRAME
+            if(ETH_TX_FRAME_START)
+            begin
+                eth_tx_len = 0;
+            end
+            if(eth_tx_len < 1600)
+            begin
+                eth_tx_capture[eth_tx_len] = ETH_TX_BYTE;
+                eth_tx_len = eth_tx_len + 1;
+            end
+            if(ETH_TX_FRAME_END)
+            begin
+                if(eth_tx_len >= 54 &&
+                   eth_tx_capture[12] == 8'h08 &&
+                   eth_tx_capture[13] == 8'h00 &&
+                   eth_tx_capture[23] == 8'h06 &&
+                   eth_tx_capture[34] == 8'hc3 &&
+                   eth_tx_capture[35] == 8'hb4 &&
+                   eth_tx_capture[36] == 8'h9c &&
+                   eth_tx_capture[37] == 8'h40 &&
+                   eth_tx_capture[47] == 8'h12)
+                begin
+                    tcp_data_server_iss = {
+                        eth_tx_capture[38],
+                        eth_tx_capture[39],
+                        eth_tx_capture[40],
+                        eth_tx_capture[41]
+                    };
+                    tcp_data_synack_seen = 1'b1;
+                    $display("darketh sim tcp data synack iss=%x",
+                             tcp_data_server_iss);
+                end
+            end
+`endif
         end
     end
 `endif

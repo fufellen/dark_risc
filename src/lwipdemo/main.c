@@ -187,8 +187,13 @@
 #define SIM_FLAG_CONTROL            0x02u
 #define SIM_FLAG_FWLOADER           0x04u
 #define SIM_FLAG_PSRAM              0x08u
-#ifdef LIDARSIM_PSRAM_SIM_SELFTEST
+#define SIM_FLAG_TCP_DATA           0x10u
+#if defined(LIDARSIM_PSRAM_SIM_SELFTEST) && defined(LIDARSIM_PSRAM_TCP_SIM_SELFTEST)
+#define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER | SIM_FLAG_PSRAM | SIM_FLAG_TCP_DATA)
+#elif defined(LIDARSIM_PSRAM_SIM_SELFTEST)
 #define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER | SIM_FLAG_PSRAM)
+#elif defined(LIDARSIM_PSRAM_TCP_SIM_SELFTEST)
+#define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER | SIM_FLAG_TCP_DATA)
 #else
 #define SIM_FLAGS_DONE              (SIM_FLAG_DISCOVERY | SIM_FLAG_CONTROL | SIM_FLAG_FWLOADER)
 #endif
@@ -2756,6 +2761,19 @@ static void service_msop_tcp(void)
                           (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
         tcp_output(tcp_data_client);
+#ifdef LIDARSIM_PSRAM_TCP_SIM_SELFTEST
+        if (sim_progress_flags != 0xffu &&
+            len == LIDARSIM_MSOP_PACKET_MAX &&
+            psram_msop_stage_buf[0] == 0xffu &&
+            psram_msop_stage_buf[1] == 0xfeu &&
+            psram_msop_stage_buf[len - 2u] == 0xffu &&
+            psram_msop_stage_buf[len - 1u] == 0x9bu) {
+            sim_progress_flags |= SIM_FLAG_TCP_DATA;
+            printf("lidarsim psram tcp msop ok len=%x slot=%x ops=%x\n",
+                   len, slot, psram->op_count);
+            maybe_report_sim_ok();
+        }
+#endif
         psram_msop_len[slot] = 0;
         psram_msop_tail++;
         if (psram_msop_tail >= LIDARSIM_MSOP_TX_BUFFERS) {
