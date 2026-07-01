@@ -314,8 +314,16 @@ static unsigned psram_msop_head;
 static unsigned psram_msop_tail;
 static unsigned psram_msop_count;
 static unsigned psram_msop_len[LIDARSIM_MSOP_TX_BUFFERS];
+/* MSOP frames live in external PSRAM, so BRAM keeps a single shared scratch
+ * buffer used both to build a frame before writing it to PSRAM and to read a
+ * frame back from PSRAM before tcp_write (TCP_WRITE_FLAG_COPY frees it at once).
+ * The separate readback-compare buffer is only needed by the startup PSRAM
+ * self-test in simulation builds. Dropping the second 758-byte buffer restores
+ * soft-MCU stack headroom above the safe threshold on the 64 KiB image. */
 static unsigned char psram_msop_build_buf[LIDARSIM_MSOP_PACKET_MAX];
+#ifdef LIDARSIM_PSRAM_SIM_SELFTEST
 static unsigned char psram_msop_stage_buf[LIDARSIM_MSOP_PACKET_MAX];
+#endif
 #ifdef LIDARSIM_PSRAM_TCP_SIM_SELFTEST
 static unsigned psram_tcp_sim_frames_seen;
 #endif
@@ -2776,22 +2784,22 @@ static void service_msop_tcp(void)
     }
 
     if (psram_read_bytes(psram_msop_slot_addr(slot),
-                         psram_msop_stage_buf, len)) {
+                         psram_msop_build_buf, len)) {
         psram_stream_fault("read");
         return;
     }
 
-    err_t err = tcp_write(tcp_data_client, psram_msop_stage_buf,
+    err_t err = tcp_write(tcp_data_client, psram_msop_build_buf,
                           (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
         tcp_output(tcp_data_client);
 #ifdef LIDARSIM_PSRAM_TCP_SIM_SELFTEST
         if (sim_progress_flags != 0xffu &&
             len == LIDARSIM_MSOP_PACKET_MAX &&
-            psram_msop_stage_buf[0] == 0xffu &&
-            psram_msop_stage_buf[1] == 0xfeu &&
-            psram_msop_stage_buf[len - 2u] == 0xffu &&
-            psram_msop_stage_buf[len - 1u] == 0x9bu) {
+            psram_msop_build_buf[0] == 0xffu &&
+            psram_msop_build_buf[1] == 0xfeu &&
+            psram_msop_build_buf[len - 2u] == 0xffu &&
+            psram_msop_build_buf[len - 1u] == 0x9bu) {
             if (psram_tcp_sim_frames_seen < LIDARSIM_PSRAM_TCP_SIM_FRAMES) {
                 psram_tcp_sim_frames_seen++;
                 printf("lidarsim psram tcp msop frame ok count=%x len=%x slot=%x ops=%x\n",
@@ -2811,6 +2819,11 @@ static void service_msop_tcp(void)
             psram_msop_tail = 0;
         }
         psram_msop_count--;
+    } else {
+        tcp_abort(tcp_data_client);
+        tcp_data_client = 0;
+        msop_tx_reset();
+        return;
     }
 #else
     static unsigned char packets[LIDARSIM_MSOP_TX_BUFFERS][LIDARSIM_MSOP_PACKET_MAX];
@@ -2838,8 +2851,6 @@ static void service_msop_tcp(void)
     err_t err = tcp_write(tcp_data_client, packet, (u16_t)len, 0);
     if (err == ERR_OK) {
         tcp_output(tcp_data_client);
-    }
-    if (err == ERR_OK) {
         msop_frame_num++;
         last_msop_ms = now;
         msop_nocopy_unacked_bytes[buf_index] = len;
@@ -2848,6 +2859,11 @@ static void service_msop_tcp(void)
             msop_tx_head = 0;
         }
         msop_tx_inflight++;
+    } else {
+        tcp_abort(tcp_data_client);
+        tcp_data_client = 0;
+        msop_tx_reset();
+        return;
     }
 #endif
 }
