@@ -2348,6 +2348,21 @@ static void msop_tx_reset(void)
 #endif
 }
 
+#ifdef LIDARSIM_PSRAM_MMIO
+static void psram_stream_fault(const char *what)
+{
+    printf("lidarsim psram stream fault %s status=%x ops=%x\n",
+           what, psram->status, psram->op_count);
+    psram_available = 0;
+    psram_retry_ms = sys_now();
+    msop_tx_reset();
+    if (tcp_data_client) {
+        tcp_abort(tcp_data_client);
+        tcp_data_client = 0;
+    }
+}
+#endif
+
 static void msop_tx_acked(unsigned len)
 {
     while (len && msop_tx_inflight) {
@@ -2746,7 +2761,7 @@ static void service_msop_tcp(void)
             msop_frame_num++;
             last_msop_ms = now;
         } else {
-            printf("lidarsim psram msop write fail\n");
+            psram_stream_fault("write");
         }
     }
 
@@ -2762,7 +2777,7 @@ static void service_msop_tcp(void)
 
     if (psram_read_bytes(psram_msop_slot_addr(slot),
                          psram_msop_stage_buf, len)) {
-        printf("lidarsim psram msop read fail\n");
+        psram_stream_fault("read");
         return;
     }
 

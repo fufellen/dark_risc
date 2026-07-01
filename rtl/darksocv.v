@@ -31,11 +31,10 @@
 `timescale 1ns / 1ps
 `include "../rtl/config.vh"
 
-module darksocv
-`ifdef SPI
-#(parameter integer SPI_DIV_COEF = 0)
-`endif
-(
+module darksocv #(
+    parameter integer SPI_DIV_COEF = 0,
+    parameter PSRAM_USE_QSPI = 1'b0
+) (
     input        XCLK,      // external clock
     input        XRES,      // external reset
 
@@ -504,10 +503,13 @@ module darksocv
     darkpsram_mmio #(
         .POWERUP_WAIT_CYCLES(64),
         .RESET_WAIT_CYCLES(32),
-        .GAP_CYCLES(4)
+        .GAP_CYCLES(4),
+        .USE_QSPI(PSRAM_USE_QSPI)
     ) psram0
 `else
-    darkpsram_mmio psram0
+    darkpsram_mmio #(
+        .USE_QSPI(PSRAM_USE_QSPI)
+    ) psram0
 `endif
     (
         .CLK                    (CLK),

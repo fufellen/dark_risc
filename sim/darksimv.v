@@ -928,11 +928,14 @@ module darksimv;
 
 `endif
 
-    darksocv
-`ifdef SPI
-    #(.SPI_DIV_COEF(1))
+    darksocv #(
+        .SPI_DIV_COEF(1),
+`ifdef DARKPSRAM_QSPI
+        .PSRAM_USE_QSPI(1'b1)
+`else
+        .PSRAM_USE_QSPI(1'b0)
 `endif
-    soc0
+    ) soc0
     (
         .XCLK(CLK),
         .XRES(|RES),

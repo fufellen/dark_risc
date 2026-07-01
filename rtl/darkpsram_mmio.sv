@@ -12,7 +12,8 @@
 module darkpsram_mmio #(
     parameter int unsigned POWERUP_WAIT_CYCLES = 100_000,
     parameter int unsigned RESET_WAIT_CYCLES = 50_000,
-    parameter int unsigned GAP_CYCLES = 8
+    parameter int unsigned GAP_CYCLES = 8,
+    parameter bit USE_QSPI = 1'b0
 )(
     input  wire logic   CLK,
     input  wire logic   RES,
@@ -44,6 +45,9 @@ module darkpsram_mmio #(
     localparam logic [31:0] CTRL_START_WRITE = 32'h0000_0002;
     localparam logic [31:0] CTRL_CLEAR_DONE = 32'h0000_0100;
     localparam logic [31:0] CTRL_CLEAR_ERROR = 32'h0000_0200;
+    localparam logic [7:0] READ_CMD = USE_QSPI ? 8'hEB : 8'h03;
+    localparam logic [7:0] WRITE_CMD = USE_QSPI ? 8'h38 : 8'h02;
+    localparam logic [3:0] READ_WAIT_STATES = USE_QSPI ? 4'd6 : 4'd0;
 
     typedef enum logic [3:0] {
         ST_POWERUP_WAIT,
@@ -278,6 +282,13 @@ module darkpsram_mmio #(
                     if (wait_counter >= RESET_WAIT_CYCLES - 1) begin
                         wait_counter <= 32'd0;
                         init_done <= 1'b1;
+                        // synthesis translate_off
+                        if (USE_QSPI) begin
+                            $display("darkpsram_mmio mode=QSPI");
+                        end else begin
+                            $display("darkpsram_mmio mode=SPI");
+                        end
+                        // synthesis translate_on
                         state <= ST_IDLE;
                     end else begin
                         wait_counter <= wait_counter + 1'b1;
@@ -286,26 +297,26 @@ module darkpsram_mmio #(
 
                 ST_IDLE: begin
                     if (pending_write) begin
-                        ctrl_cmd <= 8'h02;
+                        ctrl_cmd <= WRITE_CMD;
                         ctrl_addr <= cmd_addr;
                         ctrl_data_i <= cmd_wdata;
                         ctrl_size <= 3'd4;
                         ctrl_wait_states <= 4'd0;
                         ctrl_rd_wr <= 1'b0;
-                        ctrl_qspi <= 1'b0;
+                        ctrl_qspi <= USE_QSPI;
                         ctrl_qpi <= 1'b0;
                         ctrl_short_cmd <= 1'b0;
                         ctrl_start <= 1'b1;
                         pending_write <= 1'b0;
                         state <= ST_WRITE_WAIT;
                     end else if (pending_read) begin
-                        ctrl_cmd <= 8'h03;
+                        ctrl_cmd <= READ_CMD;
                         ctrl_addr <= cmd_addr;
                         ctrl_data_i <= 32'h00000000;
                         ctrl_size <= 3'd4;
-                        ctrl_wait_states <= 4'd0;
+                        ctrl_wait_states <= READ_WAIT_STATES;
                         ctrl_rd_wr <= 1'b1;
-                        ctrl_qspi <= 1'b0;
+                        ctrl_qspi <= USE_QSPI;
                         ctrl_qpi <= 1'b0;
                         ctrl_short_cmd <= 1'b0;
                         ctrl_start <= 1'b1;
