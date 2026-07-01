@@ -34,7 +34,18 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
 #define MEM_ALIGNMENT                   4
-#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
+#if defined(LIDARSIM_PSRAM_MMIO)
+/* The PSRAM lidar image streams 758-byte MSOP frames via tcp_write(COPY), which
+ * allocates from this lwIP heap. 1024 was too small: under sustained streaming
+ * the heap exhausted, then discovery responses / SYN-ACKs / tcp_write all failed
+ * to allocate (ERR_MEM) while the CPU main loop kept running -> the board looked
+ * "wedged" (all soft ports dead) though only the heap was starved. */
+#ifdef LIDARSIM_DIAG_BEACON
+#define MEM_SIZE                        1536   /* leave 64K room for beacon+stats */
+#else
+#define MEM_SIZE                        2560
+#endif
+#elif defined(LIDARSIM_DDR3_DIAG)
 #define MEM_SIZE                        1024
 #else
 #define MEM_SIZE                        2048
@@ -98,7 +109,22 @@
 #define CHECKSUM_GEN_UDP                1
 #define CHECKSUM_GEN_TCP                1
 
+#ifdef LIDARSIM_DIAG_BEACON
+#define LWIP_STATS                      1
+#define LWIP_STATS_DISPLAY              0
+#define MEM_STATS                       1
+#define MEMP_STATS                      0
+#define LINK_STATS                      0
+#define ETHARP_STATS                    0
+#define IP_STATS                        0
+#define IPFRAG_STATS                    0
+#define ICMP_STATS                      0
+#define UDP_STATS                       0
+#define TCP_STATS                       0
+#define SYS_STATS                       0
+#else
 #define LWIP_STATS                      0
+#endif
 #define LWIP_DEBUG                      0
 
 #endif

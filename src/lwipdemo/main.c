@@ -307,6 +307,13 @@ static unsigned msop_tx_tail;
 static unsigned msop_tx_inflight;
 static unsigned msop_nocopy_unacked_bytes[LIDARSIM_MSOP_TX_BUFFERS];
 static unsigned debug_leds_last_ms;
+#ifdef LIDARSIM_DIAG_BEACON
+static unsigned diag_loop_ticks;
+static unsigned diag_alloc_fail;
+static unsigned diag_beacon_seq;
+static unsigned diag_beacon_ms;
+static unsigned diag_rx_frames;
+#endif
 #ifdef LIDARSIM_PSRAM_MMIO
 static int psram_available;
 static unsigned psram_retry_ms;
@@ -2208,7 +2215,9 @@ static err_t tcp_control_recv(void *arg, struct tcp_pcb *tpcb,
     }
 
     if (!p) {
-        tcp_close(tpcb);
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+        }
         if (conn) {
             conn->pcb = 0;
             conn->len = 0;
@@ -2274,7 +2283,9 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
     }
 
     if (!p) {
-        tcp_close(tpcb);
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+        }
         if (conn) {
             conn->pcb = 0;
             conn->len = 0;
@@ -2408,7 +2419,9 @@ static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
         return err;
     }
     if (!p) {
-        tcp_close(tpcb);
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+        }
         if (tcp_data_client == tpcb) {
             tcp_data_client = 0;
         }
@@ -2820,6 +2833,9 @@ static void service_msop_tcp(void)
         }
         psram_msop_count--;
     } else {
+#ifdef LIDARSIM_DIAG_BEACON
+        diag_alloc_fail++;
+#endif
         tcp_abort(tcp_data_client);
         tcp_data_client = 0;
         msop_tx_reset();
@@ -2860,6 +2876,9 @@ static void service_msop_tcp(void)
         }
         msop_tx_inflight++;
     } else {
+#ifdef LIDARSIM_DIAG_BEACON
+        diag_alloc_fail++;
+#endif
         tcp_abort(tcp_data_client);
         tcp_data_client = 0;
         msop_tx_reset();
@@ -3094,6 +3113,9 @@ static err_t poll_rx_frame(void)
     if (!(status & ETH_STATUS_RX_AVAILABLE)) {
         return ERR_OK;
     }
+#ifdef LIDARSIM_DIAG_BEACON
+    diag_rx_frames++;
+#endif
 
     unsigned len = eth->rx_len;
 
@@ -3140,6 +3162,121 @@ static err_t poll_rx_frame(void)
 
     return err;
 }
+
+#ifdef LIDARSIM_DIAG_BEACON
+/* Firmware-driven diagnostic alive-beacon. Distinct from the hardware fabric
+ * heartbeat: it runs from the soft-MCU main loop, so if the CPU wedges the
+ * beacon STOPS while the fabric heartbeat keeps going. Each beacon reports the
+ * main-loop tick counter (CPU alive vs hung) and the TCP pcb list lengths
+ * (prime suspect: TIME_WAIT pcbs accumulating and exhausting MEMP_NUM_TCP_PCB). */
+#include "lwip/stats.h"
+#include "lwip/memp.h"
+extern struct tcp_pcb *tcp_active_pcbs;
+extern struct tcp_pcb *tcp_tw_pcbs;
+extern struct tcp_pcb *tcp_bound_pcbs;
+
+#define LIDARSIM_DIAG_BEACON_PORT 50099u
+#define LIDARSIM_DIAG_BEACON_MS   250u
+
+static unsigned diag_count_pcbs(const struct tcp_pcb *list)
+{
+    unsigned n = 0;
+    while (list) { n++; list = list->next; }
+    return n;
+}
+
+static int diag_put_hex(char *buf, unsigned v)
+{
+    char tmp[8];
+    int n = 0;
+    if (v == 0) { buf[0] = '0'; return 1; }
+    while (v) { unsigned d = v & 0xfu; tmp[n++] = (d < 10u) ? ('0' + d) : ('a' + d - 10u); v >>= 4; }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static int diag_put_kv(char *buf, const char *key, unsigned v)
+{
+    int p = 0;
+    while (key[p]) { buf[p] = key[p]; p++; }
+    buf[p++] = '=';
+    p += diag_put_hex(buf + p, v);
+    buf[p++] = ' ';
+    return p;
+}
+
+static err_t diag_send_broadcast(const unsigned char *data, unsigned len)
+{
+    static unsigned char frame[14u + 20u + 8u + 256u];
+    unsigned ip_len = 20u + 8u + len;
+    unsigned frame_len = 14u + ip_len;
+
+    if (len > 256u) {
+        return ERR_BUF;
+    }
+    for (unsigned i = 0; i < 6u; i++) {
+        frame[i] = 0xffu;               /* dst MAC broadcast */
+    }
+    copy_bytes(frame + 6, runtime_config.mac, 6);
+    frame[12] = 0x08u; frame[13] = 0x00u;
+    frame[14] = 0x45u; frame[15] = 0x00u;
+    write_be16(frame + 16, ip_len);
+    write_be16(frame + 18, 0);
+    write_be16(frame + 20, 0);
+    frame[22] = 255u; frame[23] = 17u;
+    write_be16(frame + 24, 0);
+    copy_bytes(frame + 26, runtime_config.ip, 4);
+    frame[30] = 255u; frame[31] = 255u; frame[32] = 255u; frame[33] = 255u; /* dst IP bcast */
+    write_be16(frame + 24, ipv4_header_checksum(frame + 14, 20u));
+    write_be16(frame + 34, LIDARSIM_DIAG_BEACON_PORT);
+    write_be16(frame + 36, LIDARSIM_DIAG_BEACON_PORT);
+    write_be16(frame + 38, 8u + len);
+    write_be16(frame + 40, 0);
+    copy_bytes(frame + 42, data, len);
+    return send_raw_frame_bytes(frame, frame_len);
+}
+
+static void service_diag_beacon(void)
+{
+    unsigned now = sys_now();
+    static char buf[256];
+    int p = 0;
+    unsigned st0 = 0, lp0 = 0;
+    const char *tag = "R120DIAG ";
+
+    if (diag_beacon_ms && ((now - diag_beacon_ms) < LIDARSIM_DIAG_BEACON_MS)) {
+        return;
+    }
+    diag_beacon_ms = now;
+    diag_beacon_seq++;
+
+    for (int i = 0; tag[i]; i++) { buf[p++] = tag[i]; }
+    p += diag_put_kv(buf + p, "s", diag_beacon_seq);
+    p += diag_put_kv(buf + p, "lp", diag_loop_ticks);
+    p += diag_put_kv(buf + p, "ms", now);
+    p += diag_put_kv(buf + p, "cl", tcp_data_client ? 1u : 0u);
+    p += diag_put_kv(buf + p, "af", diag_alloc_fail);
+    p += diag_put_kv(buf + p, "rx", diag_rx_frames);
+    p += diag_put_kv(buf + p, "act", diag_count_pcbs(tcp_active_pcbs));
+    p += diag_put_kv(buf + p, "tw", diag_count_pcbs(tcp_tw_pcbs));
+    p += diag_put_kv(buf + p, "bnd", diag_count_pcbs(tcp_bound_pcbs));
+    if (tcp_active_pcbs) { st0 = tcp_active_pcbs->state; lp0 = tcp_active_pcbs->local_port; }
+    p += diag_put_kv(buf + p, "st0", st0);
+    p += diag_put_kv(buf + p, "lp0", lp0);
+    p += diag_put_kv(buf + p, "mu", (unsigned)lwip_stats.mem.used);
+    p += diag_put_kv(buf + p, "mmx", (unsigned)lwip_stats.mem.max);
+    p += diag_put_kv(buf + p, "me", (unsigned)lwip_stats.mem.err);
+#ifdef LIDARSIM_PSRAM_MMIO
+    p += diag_put_kv(buf + p, "pa", psram_available ? 1u : 0u);
+    p += diag_put_kv(buf + p, "pc", psram_msop_count);
+#endif
+    buf[p++] = '\n';
+
+    if (diag_send_broadcast((const unsigned char *)buf, (unsigned)p) != ERR_OK) {
+        diag_alloc_fail++;
+    }
+}
+#endif
 
 int main(void)
 {
@@ -3244,5 +3381,9 @@ int main(void)
         poll_rx_frame();
         sys_check_timeouts();
         service_msop_tcp();
+#ifdef LIDARSIM_DIAG_BEACON
+        diag_loop_ticks++;
+        service_diag_beacon();
+#endif
     }
 }
