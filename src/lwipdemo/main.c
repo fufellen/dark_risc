@@ -2215,12 +2215,13 @@ static err_t tcp_control_recv(void *arg, struct tcp_pcb *tpcb,
     }
 
     if (!p) {
-        if (tcp_close(tpcb) != ERR_OK) {
-            tcp_abort(tpcb);
-        }
         if (conn) {
             conn->pcb = 0;
             conn->len = 0;
+        }
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+            return ERR_ABRT;   /* aborted our own pcb -> must not return ERR_OK */
         }
         return ERR_OK;
     }
@@ -2283,15 +2284,16 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
     }
 
     if (!p) {
-        if (tcp_close(tpcb) != ERR_OK) {
-            tcp_abort(tpcb);
-        }
         if (conn) {
             conn->pcb = 0;
             conn->len = 0;
         }
         firmware_session_clear();
         printf("fwloader tcp closed\n");
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+            return ERR_ABRT;   /* aborted our own pcb -> must not return ERR_OK */
+        }
         return ERR_OK;
     }
 
@@ -2419,14 +2421,15 @@ static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
         return err;
     }
     if (!p) {
-        if (tcp_close(tpcb) != ERR_OK) {
-            tcp_abort(tpcb);
-        }
         if (tcp_data_client == tpcb) {
             tcp_data_client = 0;
         }
         msop_tx_reset();
         printf("lidarsim tcp data closed\n");
+        if (tcp_close(tpcb) != ERR_OK) {
+            tcp_abort(tpcb);
+            return ERR_ABRT;   /* aborted our own pcb -> must not return ERR_OK */
+        }
         return ERR_OK;
     }
 
