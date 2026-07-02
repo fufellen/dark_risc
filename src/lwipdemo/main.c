@@ -356,6 +356,9 @@ static unsigned sim_progress_flags;
 static unsigned last_rx_peer_valid;
 static unsigned char last_rx_peer_mac[6];
 static unsigned char last_rx_peer_ip[4];
+/* consecutive pbuf_alloc(PBUF_POOL) failures in poll_rx_frame: the wedge
+ * signature that triggers net_self_heal() */
+static unsigned rx_nopbuf_streak;
 
 static struct LIDARSIM_CONFIG runtime_config = {
     .mac = {0x02, 0x20, 0x20, 0x20, 0x20, 0x01},
@@ -2559,13 +2562,40 @@ static void service_pending_network_reconfig(void)
  * (PBUF_POOL) -> all RX starves while the CPU keeps running. A permanently
  * fresh entry means unicast replies never traverse the PENDING path. */
 static unsigned arp_refresh_ms;
+static unsigned arp_static_pinned;
 static void service_arp_refresh(void)
 {
     unsigned now = sys_now();
 
-    if (!netif_configured) {
+    if (!netif_configured || arp_static_pinned) {
         return;
     }
+
+    /* Best neutralization: once we have seen any IPv4 packet from the host,
+     * pin its MAC as a STATIC arp entry. Static entries are neither aged nor
+     * recycled (the 4..8-slot table churns constantly on a busy LAN because
+     * etharp_input caches every neighbour that ARPs for us), so the dangerous
+     * PENDING path can never trigger for the host again. If remote_ip is
+     * reconfigured at runtime, the stale static entry is harmless for the
+     * bench flow; a full solution would remove/re-pin on NET_CONFIG. */
+    if (last_rx_peer_valid &&
+        last_rx_peer_ip[0] == runtime_config.remote_ip[0] &&
+        last_rx_peer_ip[1] == runtime_config.remote_ip[1] &&
+        last_rx_peer_ip[2] == runtime_config.remote_ip[2] &&
+        last_rx_peer_ip[3] == runtime_config.remote_ip[3]) {
+        struct eth_addr mac;
+        ip4_addr_t host;
+
+        copy_bytes(mac.addr, last_rx_peer_mac, 6);
+        ip4_from_config(&host, runtime_config.remote_ip);
+        if (etharp_add_static_entry(&host, &mac) == ERR_OK) {
+            arp_static_pinned = 1;
+            printf("lidarsim arp static pinned\n");
+            return;
+        }
+    }
+
+    /* Until pinned: keep the dynamic entry fresh with periodic requests. */
     if (arp_refresh_ms && ((now - arp_refresh_ms) < 30000u)) {
         return;
     }
@@ -3182,10 +3212,12 @@ static err_t poll_rx_frame(void)
     if (p == 0) diag_rx_nopbuf++;
 #endif
     if (p == 0) {
+        rx_nopbuf_streak++;
         printf("lidarsim rx no pbuf len=%d\n", len);
         drain_rx_frame(len);
         return ERR_MEM;
     }
+    rx_nopbuf_streak = 0;
 
     unsigned remaining = len;
     unsigned header_len = 0;
@@ -3366,12 +3398,113 @@ static void service_diag_beacon(void)
 }
 #endif
 
-int main(void)
+/* Bring up netif + all UDP/TCP listeners. Called at boot and again by the
+ * self-heal path after a full lwIP re-init. */
+static int network_init(void)
 {
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
 
+    ip4_from_config(&ipaddr, runtime_config.ip);
+    ip4_from_config(&netmask, runtime_config.netmask);
+    ip4_from_config(&gw, runtime_config.gateway);
+
+    if (netif_add(&fpga_netif, &ipaddr, &netmask, &gw, 0,
+                  darketh_netif_init, ethernet_input) == 0) {
+        printf("lidarsim netif fail\n");
+        return 1;
+    }
+
+    netif_configured = 1;
+    apply_netif_config();
+    netif_set_default(&fpga_netif);
+    netif_set_up(&fpga_netif);
+    netif_set_link_up(&fpga_netif);
+    service_debug_leds();
+
+    err_t err = udp_listener_init(&udp_discovery_listener,
+                                  runtime_config.discovery_port,
+                                  udp_discovery_recv);
+    printf("lidarsim udp discovery bind=%d port=%d\n", err,
+           runtime_config.discovery_port);
+    if (err != ERR_OK) {
+        return 1;
+    }
+
+    err = udp_listener_init(&udp_command_listener, runtime_config.cmd_port,
+                            udp_command_recv);
+    printf("lidarsim udp command bind=%d port=%d\n", err,
+           runtime_config.cmd_port);
+    if (err != ERR_OK) {
+        return 1;
+    }
+
+    err = tcp_listener_init(&tcp_data_listener, runtime_config.data_port,
+                            tcp_data_accept);
+    printf("lidarsim tcp data listen=%d port=%d\n", err,
+           runtime_config.data_port);
+    if (err != ERR_OK) {
+        return 1;
+    }
+
+    err = tcp_listener_init(&tcp_command_listener, runtime_config.cmd_port,
+                            tcp_command_accept);
+    printf("lidarsim tcp command listen=%d port=%d\n", err,
+           runtime_config.cmd_port);
+    if (err != ERR_OK) {
+        return 1;
+    }
+
+    err = tcp_listener_init(&tcp_firmware_listener, LIDARSIM_FIRMWARE_PORT,
+                            tcp_firmware_accept);
+    printf("fwloader tcp listen=%d port=%d\n", err,
+           LIDARSIM_FIRMWARE_PORT);
+    if (err != ERR_OK) {
+        return 1;
+    }
+
+    return 0;
+}
+
+/* Self-healing: the known failure mode is a stale heap-pbuf free (etharp
+ * PENDING hand-off vicinity) silently corrupting the heap free list and then
+ * the adjacent memp pools; PBUF_POOL empties and every RX frame is dropped
+ * while the CPU stays healthy. Detect the signature (pbuf_alloc(PBUF_POOL)
+ * failing many times in a row) and rebuild the whole lwIP world from scratch:
+ * lwip_init() re-inits mem/memp/netif/tcp/udp, then network_init() re-binds.
+ * Costs <1 s and turns a permanent wedge into a blip. */
+static unsigned net_heal_count;
+static void net_self_heal(void)
+{
+    net_heal_count++;
+    printf("lidarsim self-heal #%d\n", net_heal_count);
+
+    udp_discovery_listener = 0;
+    udp_command_listener = 0;
+    tcp_data_listener = 0;
+    tcp_command_listener = 0;
+    tcp_firmware_listener = 0;
+    tcp_data_client = 0;
+    tcp_control.pcb = 0;
+    tcp_control.len = 0;
+    tcp_firmware.pcb = 0;
+    tcp_firmware.len = 0;
+    firmware_session_clear();
+    msop_tx_reset();
+    last_rx_peer_valid = 0;
+    network_reconfig_pending = 0;
+    netif_configured = 0;
+    arp_static_pinned = 0;
+    arp_refresh_ms = 0;
+    rx_nopbuf_streak = 0;
+
+    lwip_init();
+    network_init();
+}
+
+int main(void)
+{
     io->led = DEBUG_LED_CPU_ALIVE;
     printf("lidarsim start\n");
 
@@ -3399,65 +3532,7 @@ int main(void)
 #endif
 #endif
 
-    ip4_from_config(&ipaddr, runtime_config.ip);
-    ip4_from_config(&netmask, runtime_config.netmask);
-    ip4_from_config(&gw, runtime_config.gateway);
-
-    if (netif_add(&fpga_netif, &ipaddr, &netmask, &gw, 0,
-                  darketh_netif_init, ethernet_input) == 0) {
-        printf("lidarsim netif fail\n>");
-        return 1;
-    }
-
-    netif_configured = 1;
-    apply_netif_config();
-    netif_set_default(&fpga_netif);
-    netif_set_up(&fpga_netif);
-    netif_set_link_up(&fpga_netif);
-    service_debug_leds();
-
-    err_t err = udp_listener_init(&udp_discovery_listener,
-                                  runtime_config.discovery_port,
-                                  udp_discovery_recv);
-    printf("lidarsim udp discovery bind=%d port=%d\n", err,
-           runtime_config.discovery_port);
-    if (err != ERR_OK) {
-        printf(">");
-        return 1;
-    }
-
-    err = udp_listener_init(&udp_command_listener, runtime_config.cmd_port,
-                            udp_command_recv);
-    printf("lidarsim udp command bind=%d port=%d\n", err,
-           runtime_config.cmd_port);
-    if (err != ERR_OK) {
-        printf(">");
-        return 1;
-    }
-
-    err = tcp_listener_init(&tcp_data_listener, runtime_config.data_port,
-                            tcp_data_accept);
-    printf("lidarsim tcp data listen=%d port=%d\n", err,
-           runtime_config.data_port);
-    if (err != ERR_OK) {
-        printf(">");
-        return 1;
-    }
-
-    err = tcp_listener_init(&tcp_command_listener, runtime_config.cmd_port,
-                            tcp_command_accept);
-    printf("lidarsim tcp command listen=%d port=%d\n", err,
-           runtime_config.cmd_port);
-    if (err != ERR_OK) {
-        printf(">");
-        return 1;
-    }
-
-    err = tcp_listener_init(&tcp_firmware_listener, LIDARSIM_FIRMWARE_PORT,
-                            tcp_firmware_accept);
-    printf("fwloader tcp listen=%d port=%d\n", err,
-           LIDARSIM_FIRMWARE_PORT);
-    if (err != ERR_OK) {
+    if (network_init()) {
         printf(">");
         return 1;
     }
@@ -3466,6 +3541,9 @@ int main(void)
         service_debug_leds();
         poll_uart_config();
         service_pending_network_reconfig();
+        if (rx_nopbuf_streak >= 32u) {
+            net_self_heal();
+        }
         DIAG_CTX(1);
         poll_rx_frame();
         DIAG_CTX(2);

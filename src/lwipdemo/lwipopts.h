@@ -98,7 +98,7 @@
 #define TCP_LISTEN_BACKLOG              0
 #define TCP_QUEUE_OOSEQ                 0
 
-#define ARP_TABLE_SIZE                  4
+#define ARP_TABLE_SIZE                  8
 #define ETHARP_SUPPORT_STATIC_ENTRIES   1
 #define ETHARP_QUEUEING                 0
 #define ETH_PAD_SIZE                    0
