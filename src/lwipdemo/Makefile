@@ -43,6 +43,10 @@ ifdef LIDARSIM_DIAG_BEACON
 override CFLAGS += -DLIDARSIM_DIAG_BEACON=1
 endif
 
+ifdef LIDARSIM_NO_ARP_REFRESH
+override CFLAGS += -DLIDARSIM_NO_ARP_REFRESH=1
+endif
+
 LWIP_OBJS = \
     init.o \
     def.o \

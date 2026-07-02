@@ -2562,40 +2562,25 @@ static void service_pending_network_reconfig(void)
  * (PBUF_POOL) -> all RX starves while the CPU keeps running. A permanently
  * fresh entry means unicast replies never traverse the PENDING path. */
 static unsigned arp_refresh_ms;
-static unsigned arp_static_pinned;
 static void service_arp_refresh(void)
 {
     unsigned now = sys_now();
 
-    if (!netif_configured || arp_static_pinned) {
+    if (!netif_configured) {
         return;
     }
 
-    /* Best neutralization: once we have seen any IPv4 packet from the host,
-     * pin its MAC as a STATIC arp entry. Static entries are neither aged nor
-     * recycled (the 4..8-slot table churns constantly on a busy LAN because
-     * etharp_input caches every neighbour that ARPs for us), so the dangerous
-     * PENDING path can never trigger for the host again. If remote_ip is
-     * reconfigured at runtime, the stale static entry is harmless for the
-     * bench flow; a full solution would remove/re-pin on NET_CONFIG. */
-    if (last_rx_peer_valid &&
-        last_rx_peer_ip[0] == runtime_config.remote_ip[0] &&
-        last_rx_peer_ip[1] == runtime_config.remote_ip[1] &&
-        last_rx_peer_ip[2] == runtime_config.remote_ip[2] &&
-        last_rx_peer_ip[3] == runtime_config.remote_ip[3]) {
-        struct eth_addr mac;
-        ip4_addr_t host;
-
-        copy_bytes(mac.addr, last_rx_peer_mac, 6);
-        ip4_from_config(&host, runtime_config.remote_ip);
-        if (etharp_add_static_entry(&host, &mac) == ERR_OK) {
-            arp_static_pinned = 1;
-            printf("lidarsim arp static pinned\n");
-            return;
-        }
+    /* Keep the host's ARP entry fresh with a periodic request: on the shared
+     * LAN the small ARP table churns (etharp_input caches every neighbour
+     * that ARPs for us) and a stale/evicted host entry sends our unicast
+     * replies through the dangerous etharp PENDING hand-off. First request
+     * only after 2 s of uptime: the scripted ModelSim testbench consumes
+     * frames in strict order and an unexpected boot-time ARP request desyncs
+     * it (sim runs << 2 s of virtual time). Residual wedge occurrences are
+     * covered by net_self_heal(). */
+    if (now < 2000u) {
+        return;
     }
-
-    /* Until pinned: keep the dynamic entry fresh with periodic requests. */
     if (arp_refresh_ms && ((now - arp_refresh_ms) < 30000u)) {
         return;
     }
@@ -3495,7 +3480,6 @@ static void net_self_heal(void)
     last_rx_peer_valid = 0;
     network_reconfig_pending = 0;
     netif_configured = 0;
-    arp_static_pinned = 0;
     arp_refresh_ms = 0;
     rx_nopbuf_streak = 0;
 
@@ -3548,7 +3532,9 @@ int main(void)
         poll_rx_frame();
         DIAG_CTX(2);
         sys_check_timeouts();
+#ifndef LIDARSIM_NO_ARP_REFRESH
         service_arp_refresh();
+#endif
         DIAG_CTX(3);
         service_msop_tcp();
 #ifdef LIDARSIM_DIAG_BEACON
