@@ -3198,8 +3198,9 @@ static err_t poll_rx_frame(void)
 #endif
     if (p == 0) {
         rx_nopbuf_streak++;
-        printf("lidarsim rx no pbuf len=%d\n", len);
+        printf("lidarsim rx no pbuf len=%d drain...\n", len);
         drain_rx_frame(len);
+        printf("lidarsim rx drain done\n");
         return ERR_MEM;
     }
     rx_nopbuf_streak = 0;
@@ -3227,7 +3228,16 @@ static err_t poll_rx_frame(void)
     }
 
     if (eth->status & (ETH_STATUS_RX_OVERFLOW | ETH_STATUS_RX_DROPPED)) {
-        printf("lidarsim rx flags=%x\n", eth->status);
+        /* rate-limited: on a live UART every printf busy-waits ~2 ms and the
+         * ambient LAN sets these flags on most frames — an unthrottled print
+         * storm slows the RX loop enough to cause the very overflows it
+         * reports */
+        static unsigned rx_flags_ms;
+        unsigned now_ms = sys_now();
+        if (!rx_flags_ms || ((now_ms - rx_flags_ms) >= 5000u)) {
+            rx_flags_ms = now_ms ? now_ms : 1u;
+            printf("lidarsim rx flags=%x\n", eth->status);
+        }
         eth->rx_ctrl = ETH_RX_CTRL_CLEAR_FLAGS;
     }
 
@@ -3522,6 +3532,9 @@ int main(void)
     }
 
     while (1) {
+        /* fabric watchdog kick: OPORT[0] toggle proves the main loop is
+         * alive; the wrapper resets the SoC if it stops for ~5 s */
+        io->oport ^= 1u;
         service_debug_leds();
         poll_uart_config();
         service_pending_network_reconfig();
