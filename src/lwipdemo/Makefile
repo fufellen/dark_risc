@@ -67,6 +67,13 @@ LWIP_OBJS = \
 OBJS = main.o compat.o $(LWIP_OBJS)
 SRCS = main.c compat.c
 
+ifdef LIDARSIM_DIAG_BEACON
+# lwIP assert call sites everywhere do not fit in 64K BRAM. Keep asserts only
+# in the heap (mem.o: MEM_OVERFLOW_CHECK guards) and pbuf.o (double-free/ref
+# checks); everything else stays assert-free like the production build.
+$(filter-out mem.o,$(LWIP_OBJS)) main.o compat.o: override CFLAGS += -DLWIP_NOASSERT=1
+endif
+
 DEPS = $(SRCS) $(OBJS) $(LIBS)
 TARGETS = $(PROJ).a
 

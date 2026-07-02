@@ -22,3 +22,22 @@ void *memmove(void *dst, const void *src, size_t len)
 
     return dst;
 }
+
+#ifdef LIDARSIM_DIAG_BEACON
+/* Minimal snprintf stub for mem.c MEM_OVERFLOW_CHECK message formatting.
+ * darklibc has no snprintf; the formatted text is unused (assert hook passes
+ * only __LINE__), so copying the format string truncated is enough. */
+int snprintf(char *out, size_t size, const char *fmt, ...)
+{
+    size_t i = 0;
+    if (!out || size == 0) {
+        return 0;
+    }
+    while (fmt && fmt[i] && (i + 1u) < size) {
+        out[i] = fmt[i];
+        i++;
+    }
+    out[i] = 0;
+    return (int)i;
+}
+#endif

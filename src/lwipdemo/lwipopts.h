@@ -41,7 +41,7 @@
  * to allocate (ERR_MEM) while the CPU main loop kept running -> the board looked
  * "wedged" (all soft ports dead) though only the heap was starved. */
 #ifdef LIDARSIM_DIAG_BEACON
-#define MEM_SIZE                        1536   /* leave 64K room for beacon+stats */
+#define MEM_SIZE                        640    /* fit overflow-check diag in 64K */
 #else
 #define MEM_SIZE                        2560
 #endif
@@ -58,7 +58,9 @@
 #define MEMP_NUM_UDP_PCB                3
 #define MEMP_NUM_TCP_PCB                4
 #define MEMP_NUM_TCP_PCB_LISTEN         3
-#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
+#ifdef LIDARSIM_DIAG_BEACON
+#define MEMP_NUM_TCP_SEG                4
+#elif defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define MEMP_NUM_TCP_SEG                6
 #else
 #define MEMP_NUM_TCP_SEG                8
@@ -81,7 +83,11 @@
 #else
 #define TCP_WND                         (2 * TCP_MSS)
 #endif
-#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
+#ifdef LIDARSIM_DIAG_BEACON
+#define TCP_SND_BUF                     (2 * TCP_MSS)
+#define TCP_SND_QUEUELEN                4
+#define TCP_SNDQUEUELOWAT               3
+#elif defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define TCP_SND_BUF                     (2 * TCP_MSS)
 #define TCP_SND_QUEUELEN                6
 #else
@@ -109,21 +115,14 @@
 #define CHECKSUM_GEN_UDP                1
 #define CHECKSUM_GEN_TCP                1
 
-#ifdef LIDARSIM_DIAG_BEACON
-#define LWIP_STATS                      1
-#define LWIP_STATS_DISPLAY              0
-#define MEM_STATS                       1
-#define MEMP_STATS                      0
-#define LINK_STATS                      0
-#define ETHARP_STATS                    0
-#define IP_STATS                        0
-#define IPFRAG_STATS                    0
-#define ICMP_STATS                      0
-#define UDP_STATS                       0
-#define TCP_STATS                       0
-#define SYS_STATS                       0
-#else
+/* Diag beacon reads the PBUF_POOL free list directly (memp_priv.h walk);
+ * heavy LWIP_STATS/MEMP_STATS do not fit in 64K BRAM and are not needed. */
 #define LWIP_STATS                      0
+#ifdef LIDARSIM_DIAG_BEACON
+/* Catch heap-allocation overflows red-handed: guard regions around every mem
+ * allocation, checked on every mem op. Asserts are routed to diag_assert_hook
+ * (see cc.h) and reported by the beacon. */
+#define MEM_OVERFLOW_CHECK              1
 #endif
 #define LWIP_DEBUG                      0
 

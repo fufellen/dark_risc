@@ -29,7 +29,16 @@ typedef uint32_t sys_prot_t;
 #define SZT_F "d"
 
 #define LWIP_PLATFORM_DIAG(x) do { } while (0)
+#ifdef LIDARSIM_DIAG_BEACON
+/* Route lwIP assertion failures (e.g. MEM_OVERFLOW_CHECK guard hits) into the
+ * diagnostic beacon. The message string is deliberately NOT used: referencing
+ * it would materialize every assert literal in lwIP (~11 KiB, does not fit in
+ * 64K BRAM). __LINE__ is enough to locate the failing check. */
+void diag_assert_hook(unsigned line);
+#define LWIP_PLATFORM_ASSERT(x) diag_assert_hook(__LINE__)
+#else
 #define LWIP_PLATFORM_ASSERT(x) do { } while (0)
+#endif
 
 #define SYS_ARCH_DECL_PROTECT(lev) sys_prot_t lev
 #define SYS_ARCH_PROTECT(lev) do { (lev) = 0; } while (0)

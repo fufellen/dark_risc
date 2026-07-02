@@ -313,6 +313,15 @@ static unsigned diag_alloc_fail;
 static unsigned diag_beacon_seq;
 static unsigned diag_beacon_ms;
 static unsigned diag_rx_frames;
+static unsigned diag_rx_nopbuf;
+static unsigned diag_rx_chain;
+/* Context breadcrumb: which handler was executing when an lwIP assert fired.
+ * Main-loop phases 1..4, callbacks 0x11.. (no restore: next phase overwrites). */
+unsigned diag_ctx;
+static unsigned diag_assert_ctx;
+#define DIAG_CTX(v) (diag_ctx = (v))
+#else
+#define DIAG_CTX(v) do { } while (0)
 #endif
 #ifdef LIDARSIM_PSRAM_MMIO
 static int psram_available;
@@ -2092,6 +2101,7 @@ static void parse_control_stream(struct CONTROL_CONN *conn)
 static void udp_command_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                              const ip_addr_t *addr, u16_t port)
 {
+    DIAG_CTX(0x12);
     (void)arg;
 
     if (!p) {
@@ -2166,6 +2176,7 @@ static void build_discovery_response(unsigned char out[LIDAR_DISCOVERY_RESPONSE_
 static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                                const ip_addr_t *addr, u16_t port)
 {
+    DIAG_CTX(0x11);
     (void)arg;
 
     if (!p) {
@@ -2207,6 +2218,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 static err_t tcp_control_recv(void *arg, struct tcp_pcb *tpcb,
                               struct pbuf *p, err_t err)
 {
+    DIAG_CTX(0x13);
     struct CONTROL_CONN *conn = (struct CONTROL_CONN *)arg;
 
     if (err != ERR_OK) {
@@ -2244,6 +2256,7 @@ static err_t tcp_control_recv(void *arg, struct tcp_pcb *tpcb,
 
 static void tcp_control_err(void *arg, err_t err)
 {
+    DIAG_CTX(0x1b);
     struct CONTROL_CONN *conn = (struct CONTROL_CONN *)arg;
     if (conn) {
         conn->pcb = 0;
@@ -2254,6 +2267,7 @@ static void tcp_control_err(void *arg, err_t err)
 
 static err_t tcp_command_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
+    DIAG_CTX(0x18);
     (void)arg;
 
     if (err != ERR_OK || !newpcb) {
@@ -2276,6 +2290,7 @@ static err_t tcp_command_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
                                struct pbuf *p, err_t err)
 {
+    DIAG_CTX(0x15);
     struct FIRMWARE_CONN *conn = (struct FIRMWARE_CONN *)arg;
 
     if (err != ERR_OK) {
@@ -2316,6 +2331,7 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
 
 static void tcp_firmware_err(void *arg, err_t err)
 {
+    DIAG_CTX(0x1c);
     struct FIRMWARE_CONN *conn = (struct FIRMWARE_CONN *)arg;
     if (conn) {
         conn->pcb = 0;
@@ -2327,6 +2343,7 @@ static void tcp_firmware_err(void *arg, err_t err)
 
 static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
+    DIAG_CTX(0x19);
     (void)arg;
 
     if (err != ERR_OK || !newpcb) {
@@ -2406,6 +2423,7 @@ static void msop_tx_acked(unsigned len)
 
 static err_t tcp_data_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
+    DIAG_CTX(0x16);
     (void)arg;
     (void)tpcb;
     msop_tx_acked(len);
@@ -2415,6 +2433,7 @@ static err_t tcp_data_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
 static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
                            struct pbuf *p, err_t err)
 {
+    DIAG_CTX(0x14);
     (void)arg;
     if (err != ERR_OK) {
         if (p) pbuf_free(p);
@@ -2440,6 +2459,7 @@ static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
 
 static void tcp_data_err(void *arg, err_t err)
 {
+    DIAG_CTX(0x1a);
     (void)arg;
     tcp_data_client = 0;
     msop_tx_reset();
@@ -2448,6 +2468,7 @@ static void tcp_data_err(void *arg, err_t err)
 
 static err_t tcp_data_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
+    DIAG_CTX(0x17);
     (void)arg;
 
     if (err != ERR_OK || !newpcb) {
@@ -2527,6 +2548,32 @@ static void service_pending_network_reconfig(void)
     if (netif_configured) {
         apply_netif_config();
     }
+}
+
+/* Keep the host's ARP entry permanently STABLE by re-requesting it every 30 s
+ * (and right after boot). Rationale: with ARP_QUEUEING==0 lwIP's PENDING path
+ * in etharp_query() takes a reference to the in-flight reply pbuf and stashes
+ * it in arp_table[i].q; on this lwIP snapshot that hand-off was caught
+ * double-freeing a heap pbuf (mem.c "mem_free: illegal memory: double free"),
+ * which corrupts the heap free list and then tramples the adjacent memp pools
+ * (PBUF_POOL) -> all RX starves while the CPU keeps running. A permanently
+ * fresh entry means unicast replies never traverse the PENDING path. */
+static unsigned arp_refresh_ms;
+static void service_arp_refresh(void)
+{
+    unsigned now = sys_now();
+
+    if (!netif_configured) {
+        return;
+    }
+    if (arp_refresh_ms && ((now - arp_refresh_ms) < 30000u)) {
+        return;
+    }
+    arp_refresh_ms = now ? now : 1u;
+
+    ip4_addr_t host;
+    ip4_from_config(&host, runtime_config.remote_ip);
+    etharp_request(&fpga_netif, &host);
 }
 
 static unsigned angle_distance_deg(unsigned angle_deg, unsigned center_deg)
@@ -3130,6 +3177,10 @@ static err_t poll_rx_frame(void)
     }
 
     struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+#ifdef LIDARSIM_DIAG_BEACON
+    if (len > 256u) diag_rx_chain++;
+    if (p == 0) diag_rx_nopbuf++;
+#endif
     if (p == 0) {
         printf("lidarsim rx no pbuf len=%d\n", len);
         drain_rx_frame(len);
@@ -3174,6 +3225,7 @@ static err_t poll_rx_frame(void)
  * (prime suspect: TIME_WAIT pcbs accumulating and exhausting MEMP_NUM_TCP_PCB). */
 #include "lwip/stats.h"
 #include "lwip/memp.h"
+#include "lwip/priv/memp_priv.h"
 extern struct tcp_pcb *tcp_active_pcbs;
 extern struct tcp_pcb *tcp_tw_pcbs;
 extern struct tcp_pcb *tcp_bound_pcbs;
@@ -3186,6 +3238,45 @@ static unsigned diag_count_pcbs(const struct tcp_pcb *list)
     unsigned n = 0;
     while (list) { n++; list = list->next; }
     return n;
+}
+
+/* Exact PBUF_POOL free count via the memp free-list walk. Needs no MEMP_STATS
+ * (which does not fit in 64K BRAM); reads lwIP internals directly. Also counts
+ * free-list nodes lying OUTSIDE the pool memory (freelist corruption proof). */
+static unsigned diag_pf_bad;
+static unsigned diag_pbuf_pool_free(void)
+{
+    const struct memp_desc *d = memp_pools[MEMP_PBUF_POOL];
+    const struct memp *m = *(d->tab);
+    const unsigned char *base = (const unsigned char *)d->base;
+    unsigned n = 0;
+    diag_pf_bad = 0;
+    while (m && n < 255u) {
+        const unsigned char *pm = (const unsigned char *)m;
+        if (pm < base || pm >= (base + 0x1000u)) {
+            diag_pf_bad++;
+            break;              /* corrupted next-pointer: stop the walk */
+        }
+        n++;
+        m = m->next;
+    }
+    return n;
+}
+
+/* lwIP assertion sink (LWIP_PLATFORM_ASSERT -> here): counts hits and records
+ * first/last source line so the beacon reports WHICH check fired (mem.c
+ * MEM_OVERFLOW_CHECK guard lines identify heap-allocation overflows). */
+static unsigned diag_assert_count;
+static unsigned diag_assert_first_line;
+static unsigned diag_assert_last_line;
+void diag_assert_hook(unsigned line)
+{
+    if (diag_assert_count == 0) {
+        diag_assert_first_line = line;
+        diag_assert_ctx = diag_ctx;
+    }
+    diag_assert_count++;
+    diag_assert_last_line = line;
 }
 
 static int diag_put_hex(char *buf, unsigned v)
@@ -3210,11 +3301,11 @@ static int diag_put_kv(char *buf, const char *key, unsigned v)
 
 static err_t diag_send_broadcast(const unsigned char *data, unsigned len)
 {
-    static unsigned char frame[14u + 20u + 8u + 256u];
+    static unsigned char frame[14u + 20u + 8u + 160u];
     unsigned ip_len = 20u + 8u + len;
     unsigned frame_len = 14u + ip_len;
 
-    if (len > 256u) {
+    if (len > 160u) {
         return ERR_BUF;
     }
     for (unsigned i = 0; i < 6u; i++) {
@@ -3242,7 +3333,7 @@ static err_t diag_send_broadcast(const unsigned char *data, unsigned len)
 static void service_diag_beacon(void)
 {
     unsigned now = sys_now();
-    static char buf[256];
+    static char buf[160];
     int p = 0;
     unsigned st0 = 0, lp0 = 0;
     const char *tag = "R120DIAG ";
@@ -3254,25 +3345,19 @@ static void service_diag_beacon(void)
     diag_beacon_seq++;
 
     for (int i = 0; tag[i]; i++) { buf[p++] = tag[i]; }
+    (void)st0; (void)lp0;
     p += diag_put_kv(buf + p, "s", diag_beacon_seq);
     p += diag_put_kv(buf + p, "lp", diag_loop_ticks);
-    p += diag_put_kv(buf + p, "ms", now);
-    p += diag_put_kv(buf + p, "cl", tcp_data_client ? 1u : 0u);
     p += diag_put_kv(buf + p, "af", diag_alloc_fail);
     p += diag_put_kv(buf + p, "rx", diag_rx_frames);
-    p += diag_put_kv(buf + p, "act", diag_count_pcbs(tcp_active_pcbs));
-    p += diag_put_kv(buf + p, "tw", diag_count_pcbs(tcp_tw_pcbs));
-    p += diag_put_kv(buf + p, "bnd", diag_count_pcbs(tcp_bound_pcbs));
-    if (tcp_active_pcbs) { st0 = tcp_active_pcbs->state; lp0 = tcp_active_pcbs->local_port; }
-    p += diag_put_kv(buf + p, "st0", st0);
-    p += diag_put_kv(buf + p, "lp0", lp0);
-    p += diag_put_kv(buf + p, "mu", (unsigned)lwip_stats.mem.used);
-    p += diag_put_kv(buf + p, "mmx", (unsigned)lwip_stats.mem.max);
-    p += diag_put_kv(buf + p, "me", (unsigned)lwip_stats.mem.err);
-#ifdef LIDARSIM_PSRAM_MMIO
-    p += diag_put_kv(buf + p, "pa", psram_available ? 1u : 0u);
-    p += diag_put_kv(buf + p, "pc", psram_msop_count);
-#endif
+    p += diag_put_kv(buf + p, "pf", diag_pbuf_pool_free());
+    p += diag_put_kv(buf + p, "pfb", diag_pf_bad);
+    p += diag_put_kv(buf + p, "npb", diag_rx_nopbuf);
+    (void)diag_rx_chain;
+    p += diag_put_kv(buf + p, "as", diag_assert_count);
+    p += diag_put_kv(buf + p, "aa", diag_assert_first_line);
+    p += diag_put_kv(buf + p, "al", diag_assert_last_line);
+    p += diag_put_kv(buf + p, "ax", diag_assert_ctx);
     buf[p++] = '\n';
 
     if (diag_send_broadcast((const unsigned char *)buf, (unsigned)p) != ERR_OK) {
@@ -3381,12 +3466,18 @@ int main(void)
         service_debug_leds();
         poll_uart_config();
         service_pending_network_reconfig();
+        DIAG_CTX(1);
         poll_rx_frame();
+        DIAG_CTX(2);
         sys_check_timeouts();
+        service_arp_refresh();
+        DIAG_CTX(3);
         service_msop_tcp();
 #ifdef LIDARSIM_DIAG_BEACON
         diag_loop_ticks++;
+        DIAG_CTX(4);
         service_diag_beacon();
+        DIAG_CTX(0);
 #endif
     }
 }
