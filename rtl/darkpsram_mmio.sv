@@ -14,7 +14,8 @@ module darkpsram_mmio #(
     parameter int unsigned RESET_WAIT_CYCLES = 50_000,
     parameter int unsigned GAP_CYCLES = 8,
     parameter bit USE_QSPI = 1'b0,
-    parameter bit USE_CDC = 1'b0   // контроллер в своём домене PSRAM_CLK
+    parameter bit USE_CDC = 1'b0,  // контроллер в своём домене PSRAM_CLK
+    parameter bit USE_FAST_READ = 1'b0 // SPI FAST READ 0Bh+8ws: обязателен при SCK>33 МГц (READ 03h вне спеки)
 )(
     input  wire logic   CLK,
     input  wire logic   RES,
@@ -50,9 +51,9 @@ module darkpsram_mmio #(
     localparam logic [31:0] CTRL_START_WRITE = 32'h0000_0002;
     localparam logic [31:0] CTRL_CLEAR_DONE = 32'h0000_0100;
     localparam logic [31:0] CTRL_CLEAR_ERROR = 32'h0000_0200;
-    localparam logic [7:0] READ_CMD = USE_QSPI ? 8'hEB : 8'h03;
+    localparam logic [7:0] READ_CMD = USE_QSPI ? 8'hEB : (USE_FAST_READ ? 8'h0B : 8'h03);
     localparam logic [7:0] WRITE_CMD = USE_QSPI ? 8'h38 : 8'h02;
-    localparam logic [3:0] READ_WAIT_STATES = USE_QSPI ? 4'd6 : 4'd0;
+    localparam logic [3:0] READ_WAIT_STATES = USE_QSPI ? 4'd6 : (USE_FAST_READ ? 4'd8 : 4'd0);
 
     typedef enum logic [3:0] {
         ST_POWERUP_WAIT,

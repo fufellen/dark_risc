@@ -946,6 +946,9 @@ module darksimv;
 `ifdef DARKPSRAM_CDC
         ,.PSRAM_USE_CDC(1'b1)
 `endif
+`ifdef DARKPSRAM_FAST_READ
+        ,.PSRAM_USE_FAST_READ(1'b1)
+`endif
     ) soc0
     (
         .XCLK(CLK),
