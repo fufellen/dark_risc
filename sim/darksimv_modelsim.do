@@ -64,6 +64,11 @@ set rtl_files [list \
     [file join $project_dir "rtl" "darkpll.v"] \
     [file join $project_dir "rtl" "darkram.v"] \
     [file join $project_dir "rtl" "darkio.v"] \
+    [file join $project_dir "rtl" "darkspi.v"] \
+    [file join $project_dir "rtl" "lib" "spi" "spi_master.v"] \
+    [file join $project_dir "rtl" "lib" "spi" "spi_master_bb.v"] \
+    [file join $project_dir "rtl" "lib" "spi" "lis3dh_stub.v"] \
+    [file join $script_dir "w5500_model.sv"] \
     [file join $project_dir "rtl" "darketh_mmio.sv"] \
     [file join $project_dir "rtl" "darkddr3_mmio.sv"] \
     [file join $project_dir "rtl" "darkpsram_mmio.sv"]     [file join $project_dir "rtl" "darkpsram_ctrl_cdc.sv"] \

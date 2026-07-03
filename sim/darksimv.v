@@ -936,6 +936,27 @@ module darksimv;
 
 `endif
 
+`ifdef SPI
+
+    // SPI-шина soft-MCU (SPIBB bit-bang). Модель W5500 сидит на общих
+    // SCK/MOSI/MISO; её CS — OPORT[8], reset — OPORT[9] (см. w5500demo).
+    // CS флеша (OPORT[2] через spibb) при этом остаётся высоким, поэтому
+    // lis3dh_stub внутри darksocv держит MISO в z и не мешает.
+    wire W_SPI_CSN, W_SPI_SCK;
+    wire W_SPI_MOSI;
+    tri1 W_SPI_MISO;
+
+`ifdef DARKWIZNET_SIM
+    w5500_model w5500_mock (
+        .sck(W_SPI_SCK),
+        .cs_n(OPORT[8]),
+        .mosi(W_SPI_MOSI),
+        .miso(W_SPI_MISO),
+        .rst_n(OPORT[9])
+    );
+`endif
+`endif
+
     darksocv #(
         .SPI_DIV_COEF(1),
 `ifdef DARKPSRAM_QSPI
@@ -1000,6 +1021,12 @@ module darksimv;
         .S_NWE(S_NWE),
         .S_DQM(S_DQM),
         .S_DB (S_DB),
+`endif
+`ifdef SPI
+        .SPI_CSN(W_SPI_CSN),
+        .SPI_SCK(W_SPI_SCK),
+        .SPI_MOSI(W_SPI_MOSI),
+        .SPI_MISO(W_SPI_MISO),
 `endif
         .IPORT(0),
         .UART_RXD(RX),
