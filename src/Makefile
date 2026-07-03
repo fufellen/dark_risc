@@ -62,6 +62,13 @@ ifdef NOBANNER
     ASFLAGS += -DNOBANNER=1
 endif
 
+# бенч с дребезжащим UART RX: окно uart-загрузчика boot.S скачивает шум
+# поверх main() и плата уходит в цикл порченых бутов
+ifdef DARKBOOT_NO_UART
+    CFLAGS += -DDARKBOOT_NO_UART=1
+    ASFLAGS += -DDARKBOOT_NO_UART=1
+endif
+
 ifeq ($(APPLICATION),spidemo)
     CFLAGS += -DSPI=1
     ASFLAGS += -DSPI=1
