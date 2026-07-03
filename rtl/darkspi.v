@@ -33,7 +33,7 @@
 */
 
 `timescale 1ns / 1ps
-//`include "../rtl/config.vh"
+`include "../rtl/config.vh" // нужен SIMULATION: darkio подключает ESIMACK под этим ifdef
 
 // See spi_master doc for 3-wire support, and divider coefficient configuration.
 //
