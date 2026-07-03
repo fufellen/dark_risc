@@ -96,6 +96,21 @@ module darketh_mmio #(
 
     assign XDACK = (dtack == 1) || write_start;
 
+    // Атомарный приём кадра: решение принимается на ПЕРВОМ байте и не меняется
+    // до конца кадра. Без этого RELEASE посреди приёма впускал хвост кадра в
+    // буфер, а залипший rx_overflow (чистится только CPU) блокировал публикацию
+    // навечно: available=0 -> прошивка делает early-return и флаги не чистит.
+    logic rx_accepting;
+
+    // единственный порт записи rx_mem (BSRAM): два текстовых присваивания с
+    // разными адресами разворачивают память в DFF и не влезают в кристалл
+    wire rx_first_byte   = rx_byte_valid && !rx_busy;
+    wire rx_accept_first = rx_first_byte && !rx_frame_available;
+    wire rx_accept_cont  = rx_byte_valid && rx_busy && rx_accepting &&
+                           (rx_write_len < MAX_FRAME_BYTES[PTR_WIDTH-1:0]);
+    wire rx_mem_we       = rx_accept_first || rx_accept_cont;
+    wire [PTR_WIDTH-1:0] rx_mem_waddr = rx_accept_first ? {PTR_WIDTH{1'b0}} : rx_write_len;
+
     assign rx_ready_for_frame = !rx_frame_available;
     assign rx_irq = rx_frame_available;
     assign tx_ready_for_frame = !tx_busy && !tx_overflow;
@@ -115,6 +130,7 @@ module darketh_mmio #(
             rx_overflow <= 1'b0;
             rx_dropped <= 1'b0;
             rx_busy <= 1'b0;
+            rx_accepting <= 1'b0;
             rx_write_len <= '0;
             rx_frame_len <= '0;
             rx_read_idx <= '0;
@@ -137,14 +153,28 @@ module darketh_mmio #(
             tx_frame_start <= 1'b0;
             tx_frame_end <= 1'b0;
 
-            if (rx_byte_valid) begin
-                rx_busy <= 1'b1;
+            if (rx_mem_we) begin
+                rx_mem[rx_mem_waddr] <= rx_byte;
+            end
 
-                if (rx_frame_available) begin
-                    rx_overflow <= 1'b1;
-                end else if (rx_write_len < MAX_FRAME_BYTES[PTR_WIDTH-1:0]) begin
-                    rx_mem[rx_write_len] <= rx_byte;
-                    rx_write_len <= rx_write_len + 1'b1;
+            if (rx_byte_valid) begin
+                if (!rx_busy) begin
+                    // первый байт кадра: принять целиком или дропнуть целиком
+                    rx_busy <= 1'b1;
+                    if (!rx_frame_available) begin
+                        rx_accepting <= 1'b1;
+                        rx_write_len <= PTR_WIDTH'(1);
+                    end else begin
+                        rx_accepting <= 1'b0;
+                        rx_overflow <= 1'b1;
+                    end
+                end else if (rx_accepting) begin
+                    if (rx_write_len < MAX_FRAME_BYTES[PTR_WIDTH-1:0]) begin
+                        rx_write_len <= rx_write_len + 1'b1;
+                    end else begin
+                        rx_overflow <= 1'b1;
+                        rx_accepting <= 1'b0; // кадр не влез — дроп целиком
+                    end
                 end else begin
                     rx_overflow <= 1'b1;
                 end
@@ -152,19 +182,23 @@ module darketh_mmio #(
 
             if (rx_frame_valid) begin
                 rx_busy <= 1'b0;
-                if (!rx_frame_available && !rx_overflow && (rx_write_len != 0)) begin
+                // rx_overflow больше НЕ гейтит публикацию: это диагностика о
+                // других кадрах, а не о текущем
+                if (rx_accepting && !rx_frame_available && (rx_write_len != 0)) begin
                     rx_frame_available <= 1'b1;
                     rx_frame_len <= rx_write_len;
                     rx_read_idx <= '0;
                 end else begin
                     rx_dropped <= 1'b1;
                 end
+                rx_accepting <= 1'b0;
                 rx_write_len <= '0;
             end
 
             if (rx_frame_drop) begin
                 rx_busy <= 1'b0;
                 rx_dropped <= 1'b1;
+                rx_accepting <= 1'b0;
                 rx_write_len <= '0;
             end
 
