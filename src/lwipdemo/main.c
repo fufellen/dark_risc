@@ -3500,6 +3500,10 @@ static void net_self_heal(void)
 int main(void)
 {
     io->led = DEBUG_LED_CPU_ALIVE;
+    /* darkio считает TIMEUS только при io->timer != 0 — без этой записи
+     * sys_now() навсегда 0: rate-лимитеры печатают каждый кадр (UART-шторм),
+     * ARP-refresh и sys_check_timeouts() не работают. 1 Гц IRQ-делитель. */
+    io->timer = io->board_cm * 2000000u - 1u;
     printf("lidarsim start\n");
 
     lwip_init();
