@@ -364,9 +364,7 @@ static unsigned rx_nopbuf_streak;
  * ~30 с = клин RX-тракта darketh (кадры не доходят до RX_AVAILABLE, флаги
  * не взводятся, pbuf-стрик молчит) — наблюдался на железе 2026-07-03 */
 static unsigned rx_last_frame_ms;
-#ifdef LIDARSIM_RX_STARVATION_HEAL
 static void service_rx_starvation(void);
-#endif
 
 static struct LIDARSIM_CONFIG runtime_config = {
     .mac = {0x02, 0x20, 0x20, 0x20, 0x20, 0x01},
@@ -752,6 +750,48 @@ static unsigned psram_msop_slot_addr(unsigned slot)
     return LIDARSIM_PSRAM_MSOP_BASE +
            (slot * LIDARSIM_PSRAM_MSOP_STRIDE);
 }
+
+#ifdef LIDARSIM_PSRAM_BENCH
+/* Шаг 3 плана свипа: количественный замер пропускной способности PSRAM.
+ * 32-битные MMIO-операции, паттерн от адреса, замер через io->timeus
+ * (требует живой io->timer). Печать в UART TX при старте main. */
+static void lidarsim_psram_bench(void)
+{
+    const unsigned words = 4096u; /* 16 КиБ */
+    unsigned t0, t1, t2;
+    unsigned errors = 0;
+    unsigned actual;
+
+    if (psram_wait_status(PSRAM_STATUS_INIT_DONE | PSRAM_STATUS_READY_FOR_CMD,
+                          PSRAM_STATUS_INIT_DONE | PSRAM_STATUS_READY_FOR_CMD,
+                          LIDARSIM_PSRAM_TIMEOUT, "bench-init")) {
+        printf("psram bench: init timeout\n");
+        return;
+    }
+
+    t0 = io->timeus;
+    for (unsigned i = 0; i < words; i++) {
+        if (psram_write32(i * 4u, (i * 0x9e3779b9u) ^ 0xa5a5a5a5u)) {
+            printf("psram bench: write fault @%x\n", i * 4u);
+            return;
+        }
+    }
+    t1 = io->timeus;
+    for (unsigned i = 0; i < words; i++) {
+        if (psram_read32(i * 4u, &actual)) {
+            printf("psram bench: read fault @%x\n", i * 4u);
+            return;
+        }
+        if (actual != ((i * 0x9e3779b9u) ^ 0xa5a5a5a5u)) {
+            errors++;
+        }
+    }
+    t2 = io->timeus;
+
+    printf("psram bench: %d bytes wr_us=%d rd_us=%d errors=%d\n",
+           words * 4u, t1 - t0, t2 - t1, errors);
+}
+#endif
 
 static int lidarsim_psram_diag(void)
 {
@@ -3415,6 +3455,15 @@ static int network_init(void)
      * LWIP_SINGLE_NETIF повторный netif_add вечно возвращал бы NULL —
      * бесконечный цикл "netif fail". Чистим руками. */
     netif_default = NULL;
+    /* по той же причине выжившие списки pcb дают tcp_listen ERR_USE (-8):
+     * после main-return/XRES j _start ведёт в вечный цикл netif fail.
+     * lwip_init уже вызван (main или self-heal) и пере-иниц memp — чистим
+     * только головы списков. */
+    tcp_listen_pcbs.pcbs = NULL;
+    tcp_bound_pcbs = NULL;
+    tcp_active_pcbs = NULL;
+    tcp_tw_pcbs = NULL;
+    udp_pcbs = NULL;
 
     ip4_from_config(&ipaddr, runtime_config.ip);
     ip4_from_config(&netmask, runtime_config.netmask);
@@ -3509,24 +3558,16 @@ static void net_self_heal(void)
     rx_nopbuf_streak = 0;
 
     lwip_init();
-    /* lwip_init/tcp_init/udp_init НЕ сбрасывают глобальные списки pcb — после
-     * re-init memp в них остаются висячие указатели, tcp_listen возвращает
-     * ERR_USE (-8): TCP-порты после self-heal не поднимались (UDP везло —
-     * новый pcb попадал на адрес старого). Чистим явно. */
-    tcp_listen_pcbs.pcbs = NULL;
-    tcp_bound_pcbs = NULL;
-    tcp_active_pcbs = NULL;
-    tcp_tw_pcbs = NULL;
-    udp_pcbs = NULL;
-    network_init();
+    network_init(); /* чистка netif_default и списков pcb — внутри */
 }
 
 /* Клин RX-тракта: главный цикл жив (ARP-refresh идёт), но кадры перестали
  * доходить до RX_AVAILABLE — pbuf-стрик и флаги молчат, обычный self-heal
  * сам не стартует. На живом бенч-LAN (фабричный маяк 10 Гц, реальные лидары)
  * 30 с без единого кадра — достоверная аномалия: пинаем RELEASE, чистим
- * флаги и переинициализируем lwIP. */
-#ifdef LIDARSIM_RX_STARVATION_HEAL
+ * флаги и переинициализируем lwIP.
+ * Железная верификация 2026-07-03: форс-порог 100 мс дал сотни heal-циклов
+ * подряд (self-heal #446+) с чистыми ребиндами и отвечающей сетью. */
 static void service_rx_starvation(void)
 {
     unsigned now = sys_now();
@@ -3539,7 +3580,7 @@ static void service_rx_starvation(void)
         return;
     }
 #ifdef LIDARSIM_TEST_FORCE_HEAL
-    if ((now - rx_last_frame_ms) < 8u) {
+    if ((now - rx_last_frame_ms) < 100u) {
 #else
     if ((now - rx_last_frame_ms) < 30000u) {
 #endif
@@ -3551,7 +3592,6 @@ static void service_rx_starvation(void)
     net_self_heal();
     rx_last_frame_ms = sys_now();
 }
-#endif
 
 int main(void)
 {
@@ -3562,6 +3602,9 @@ int main(void)
     io->timer = io->board_cm * 2000000u - 1u;
     printf("lidarsim start\n");
 
+    #if defined(LIDARSIM_PSRAM_BENCH) && defined(LIDARSIM_PSRAM_MMIO)
+    lidarsim_psram_bench();
+#endif
     lwip_init();
     print_config();
     firmware_selftest();
@@ -3601,13 +3644,7 @@ int main(void)
         if (rx_nopbuf_streak >= 32u) {
             net_self_heal();
         }
-#ifdef LIDARSIM_RX_STARVATION_HEAL
-        /* ЭКСПЕРИМЕНТ (выключено): на железе 2026-07-03 срабатывание этого
-         * heal'а валило сеть (smoke убивал плату), хотя форс-heal в ModelSim
-         * ребиндился чисто. До railway-верификации heal-пути на железе не
-         * включать. */
         service_rx_starvation();
-#endif
         DIAG_CTX(1);
         poll_rx_frame();
         DIAG_CTX(2);

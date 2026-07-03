@@ -42,7 +42,7 @@
  * "wedged" (all soft ports dead) though only the heap was starved. */
 #ifdef LIDARSIM_DIAG_BEACON
 #define MEM_SIZE                        640    /* fit overflow-check diag in 64K */
-#elif defined(LIDARSIM_PSRAM_TCP_SIM_SELFTEST) || defined(LIDARSIM_PSRAM_SIM_SELFTEST)
+#elif defined(LIDARSIM_PSRAM_TCP_SIM_SELFTEST) || defined(LIDARSIM_PSRAM_SIM_SELFTEST) || defined(LIDARSIM_PSRAM_BENCH)
 /* Сим-селфтесты: с 2560 остаётся <300 Б стека до 0x10000 (зона ложных отказов,
  * нужно >=600 Б — см. Heisenbug diag-сборок). Сим-трафику TB хватает 2048. */
 #define MEM_SIZE                        2048
