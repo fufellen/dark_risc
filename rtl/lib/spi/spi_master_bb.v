@@ -76,7 +76,10 @@ module spi_master_bb (
     always@(posedge CLK) begin
         if (RES) begin
             IPORTFF <= 32'b0;
-        end else if (spibb_ena & !CSN) begin
+        // захват MISO при любом активном bit-bang, не только при CSN=0:
+        // на шине может висеть второй чип со своим CS на другом бите OPORT
+        // (W5500: CS=OPORT[8]), у которого CSN этого модуля остаётся высоким
+        end else if (spibb_ena) begin
 `ifdef SPI3WIRE
 //            IPORTFF <= {out_x_resp, 11'b0, rd ? MISO : 1'b1, rd, mosi_tri, spibb_ena, CSN, SCK, MOSI};
             IPORTFF <= {out_x_resp, 11'b0, mosi_tri ? 1'b1 : MISO, rd, mosi_tri, spibb_ena, CSN, SCK, MOSI};
