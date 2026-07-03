@@ -909,6 +909,14 @@ module darksimv;
         .sck(PSRAM_SCK),
         .sio(PSRAM_SIO)
     );
+
+    reg PSRAM_CLK = 0;
+`ifdef DARKPSRAM_CDC
+    // домен контроллера 2x CPU — как аппаратный профиль psram100 (50 -> 100 МГц)
+    initial while(1) #(250e6/`BOARD_CK) PSRAM_CLK = !PSRAM_CLK;
+`else
+    always @(CLK) PSRAM_CLK = CLK;
+`endif
 `endif
 
 `ifdef __SDRAM__
@@ -934,6 +942,9 @@ module darksimv;
         .PSRAM_USE_QSPI(1'b1)
 `else
         .PSRAM_USE_QSPI(1'b0)
+`endif
+`ifdef DARKPSRAM_CDC
+        ,.PSRAM_USE_CDC(1'b1)
 `endif
     ) soc0
     (
@@ -973,6 +984,8 @@ module darksimv;
         .DDR3_UI_READ_CALIB_DONE(DDR3_UI_READ_CALIB_DONE),
 `endif
 `ifdef DARKPSRAM_MMIO
+        .PSRAM_CLK(PSRAM_CLK),
+        .PSRAM_RST_N(!RES),
         .PSRAM_DIN(PSRAM_DIN),
         .PSRAM_DOUT(PSRAM_DOUT),
         .PSRAM_DOUTEN(PSRAM_DOUTEN),

@@ -13,10 +13,15 @@ module darkpsram_mmio #(
     parameter int unsigned POWERUP_WAIT_CYCLES = 100_000,
     parameter int unsigned RESET_WAIT_CYCLES = 50_000,
     parameter int unsigned GAP_CYCLES = 8,
-    parameter bit USE_QSPI = 1'b0
+    parameter bit USE_QSPI = 1'b0,
+    parameter bit USE_CDC = 1'b0   // контроллер в своём домене PSRAM_CLK
 )(
     input  wire logic   CLK,
     input  wire logic   RES,
+
+    // домен контроллера (используется только при USE_CDC=1; иначе завести CLK/!RES)
+    input  wire logic   PSRAM_CLK,
+    input  wire logic   PSRAM_RST_N,
 
     input  wire logic   XDREQ,
     input  wire logic   XRD,
@@ -107,32 +112,76 @@ module darkpsram_mmio #(
 
     assign XDACK = (dtack == 1) || write_start;
 
-    EF_PSRAM_CTRL psram_ctrl (
-        .clk(CLK),
-        .rst_n(!RES),
-        .addr(ctrl_addr),
-        .data_i(ctrl_data_i),
-        .data_o(ctrl_data_o),
-        .size(ctrl_size),
-        .start(ctrl_start),
-        .done(ctrl_done),
-        .wait_states(ctrl_wait_states),
-        .cmd(ctrl_cmd),
-        .rd_wr(ctrl_rd_wr),
-        .qspi(ctrl_qspi),
-        .qpi(ctrl_qpi),
-        .short_cmd(ctrl_short_cmd),
-        .sck(ctrl_sck),
-        .ce_n(ctrl_ce_n),
-        .din(psram_din),
-        .dout(ctrl_dout),
-        .douten(ctrl_douten)
-    );
+    generate if (USE_CDC) begin : gen_ctrl_cdc
+        // Контроллер в домене PSRAM_CLK через toggle-мост. Медленные сигналы
+        // init-битбэнга синхронизируются в домен пинов двойным триггером.
+        logic init_drive_meta = 1'b1;
+        logic init_drive_ps = 1'b1;
+        logic init_sck_meta = 1'b0;
+        logic init_sck_ps = 1'b0;
+        always_ff @(posedge PSRAM_CLK) begin
+            init_drive_meta <= init_drive;
+            init_drive_ps <= init_drive_meta;
+            init_sck_meta <= init_sck;
+            init_sck_ps <= init_sck_meta;
+        end
 
-    assign psram_sck = init_drive ? init_sck : ctrl_sck;
-    assign psram_ce_n = init_drive ? 1'b1 : ctrl_ce_n;
-    assign psram_dout = init_drive ? 4'b0001 : ctrl_dout;
-    assign psram_douten = init_drive ? 4'b0001 : ctrl_douten;
+        darkpsram_ctrl_cdc psram_ctrl (
+            .cpu_clk(CLK),
+            .cpu_res(RES),
+            .addr(ctrl_addr),
+            .data_i(ctrl_data_i),
+            .data_o(ctrl_data_o),
+            .size(ctrl_size),
+            .start(ctrl_start),
+            .done(ctrl_done),
+            .wait_states(ctrl_wait_states),
+            .cmd(ctrl_cmd),
+            .rd_wr(ctrl_rd_wr),
+            .qspi(ctrl_qspi),
+            .qpi(ctrl_qpi),
+            .short_cmd(ctrl_short_cmd),
+            .psram_clk(PSRAM_CLK),
+            .psram_rst_n(PSRAM_RST_N),
+            .psram_sck(ctrl_sck),
+            .psram_ce_n(ctrl_ce_n),
+            .psram_din(psram_din),
+            .psram_dout(ctrl_dout),
+            .psram_douten(ctrl_douten)
+        );
+
+        assign psram_sck = init_drive_ps ? init_sck_ps : ctrl_sck;
+        assign psram_ce_n = init_drive_ps ? 1'b1 : ctrl_ce_n;
+        assign psram_dout = init_drive_ps ? 4'b0001 : ctrl_dout;
+        assign psram_douten = init_drive_ps ? 4'b0001 : ctrl_douten;
+    end else begin : gen_ctrl_direct
+        EF_PSRAM_CTRL psram_ctrl (
+            .clk(CLK),
+            .rst_n(!RES),
+            .addr(ctrl_addr),
+            .data_i(ctrl_data_i),
+            .data_o(ctrl_data_o),
+            .size(ctrl_size),
+            .start(ctrl_start),
+            .done(ctrl_done),
+            .wait_states(ctrl_wait_states),
+            .cmd(ctrl_cmd),
+            .rd_wr(ctrl_rd_wr),
+            .qspi(ctrl_qspi),
+            .qpi(ctrl_qpi),
+            .short_cmd(ctrl_short_cmd),
+            .sck(ctrl_sck),
+            .ce_n(ctrl_ce_n),
+            .din(psram_din),
+            .dout(ctrl_dout),
+            .douten(ctrl_douten)
+        );
+
+        assign psram_sck = init_drive ? init_sck : ctrl_sck;
+        assign psram_ce_n = init_drive ? 1'b1 : ctrl_ce_n;
+        assign psram_dout = init_drive ? 4'b0001 : ctrl_dout;
+        assign psram_douten = init_drive ? 4'b0001 : ctrl_douten;
+    end endgenerate
 
     always_ff @(posedge CLK) begin
         if (RES) begin

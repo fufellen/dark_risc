@@ -23,7 +23,7 @@ module darkpsram_ctrl_cdc (
     output logic      [31:0] data_o,
     input  wire logic [2:0]  size,
     input  wire logic        start,
-    output logic             done,
+    output wire              done,
     input  wire logic [3:0]  wait_states,
     input  wire logic [7:0]  cmd,
     input  wire logic        rd_wr,
@@ -55,6 +55,11 @@ module darkpsram_ctrl_cdc (
 
     logic req_toggle_cpu = 1'b0;
     logic pending_cpu = 1'b0;
+    logic done_r = 1'b0;
+
+    // start в тот же такт немедленно снимает done: darkpsram_mmio входит в
+    // WAIT-состояние на следующем такте и не должен увидеть старый уровень
+    assign done = done_r & ~start;
 
     logic rsp_toggle_meta, rsp_toggle_sync, rsp_toggle_seen;
 
@@ -66,7 +71,7 @@ module darkpsram_ctrl_cdc (
         if (cpu_res) begin
             req_toggle_cpu <= 1'b0;
             pending_cpu <= 1'b0;
-            done <= 1'b0;
+            done_r <= 1'b0;
             rsp_toggle_meta <= 1'b0;
             rsp_toggle_sync <= 1'b0;
             rsp_toggle_seen <= 1'b0;
@@ -90,11 +95,11 @@ module darkpsram_ctrl_cdc (
                 lat_short_cmd <= short_cmd;
                 req_toggle_cpu <= !req_toggle_cpu;
                 pending_cpu <= 1'b1;
-                done <= 1'b0;
+                done_r <= 1'b0;
             end else if (pending_cpu && (rsp_toggle_sync != rsp_toggle_seen)) begin
                 rsp_toggle_seen <= rsp_toggle_sync;
                 data_o <= rsp_data_ps;   // стабилен: записан до rsp-toggle
-                done <= 1'b1;
+                done_r <= 1'b1;
                 pending_cpu <= 1'b0;
             end
         end

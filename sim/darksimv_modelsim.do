@@ -66,7 +66,7 @@ set rtl_files [list \
     [file join $project_dir "rtl" "darkio.v"] \
     [file join $project_dir "rtl" "darketh_mmio.sv"] \
     [file join $project_dir "rtl" "darkddr3_mmio.sv"] \
-    [file join $project_dir "rtl" "darkpsram_mmio.sv"] \
+    [file join $project_dir "rtl" "darkpsram_mmio.sv"]     [file join $project_dir "rtl" "darkpsram_ctrl_cdc.sv"] \
     [file join $project_dir "rtl" "darkcache.v"] \
     [file join $project_dir "rtl" "darkmac.v"] \
     [file join $repo_root "src" "RAM" "is66wvs1m8" "EF_PSRAM_CTRL.v"] \
