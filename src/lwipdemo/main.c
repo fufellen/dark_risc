@@ -8,6 +8,7 @@
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/udp.h"
 #include "netif/etharp.h"
 #include "netif/ethernet.h"
@@ -359,6 +360,13 @@ static unsigned char last_rx_peer_ip[4];
 /* consecutive pbuf_alloc(PBUF_POOL) failures in poll_rx_frame: the wedge
  * signature that triggers net_self_heal() */
 static unsigned rx_nopbuf_streak;
+/* метка последнего кадра, дошедшего до ethernet_input: на живом LAN тишина
+ * ~30 с = клин RX-тракта darketh (кадры не доходят до RX_AVAILABLE, флаги
+ * не взводятся, pbuf-стрик молчит) — наблюдался на железе 2026-07-03 */
+static unsigned rx_last_frame_ms;
+#ifdef LIDARSIM_RX_STARVATION_HEAL
+static void service_rx_starvation(void);
+#endif
 
 static struct LIDARSIM_CONFIG runtime_config = {
     .mac = {0x02, 0x20, 0x20, 0x20, 0x20, 0x01},
@@ -3226,6 +3234,7 @@ static err_t poll_rx_frame(void)
         printf("lidarsim input err=%d\n", err);
         pbuf_free(p);
     }
+    rx_last_frame_ms = sys_now();
 
     if (eth->status & (ETH_STATUS_RX_OVERFLOW | ETH_STATUS_RX_DROPPED)) {
         /* rate-limited: on a live UART every printf busy-waits ~2 ms and the
@@ -3401,6 +3410,12 @@ static int network_init(void)
     ip4_addr_t netmask;
     ip4_addr_t gw;
 
+    /* boot.S не чистит BSS, а после main() делает j _start: после watchdog-XRES
+     * (или в self-heal) netif_default переживает перезапуск, и с
+     * LWIP_SINGLE_NETIF повторный netif_add вечно возвращал бы NULL —
+     * бесконечный цикл "netif fail". Чистим руками. */
+    netif_default = NULL;
+
     ip4_from_config(&ipaddr, runtime_config.ip);
     ip4_from_config(&netmask, runtime_config.netmask);
     ip4_from_config(&gw, runtime_config.gateway);
@@ -3494,8 +3509,49 @@ static void net_self_heal(void)
     rx_nopbuf_streak = 0;
 
     lwip_init();
+    /* lwip_init/tcp_init/udp_init НЕ сбрасывают глобальные списки pcb — после
+     * re-init memp в них остаются висячие указатели, tcp_listen возвращает
+     * ERR_USE (-8): TCP-порты после self-heal не поднимались (UDP везло —
+     * новый pcb попадал на адрес старого). Чистим явно. */
+    tcp_listen_pcbs.pcbs = NULL;
+    tcp_bound_pcbs = NULL;
+    tcp_active_pcbs = NULL;
+    tcp_tw_pcbs = NULL;
+    udp_pcbs = NULL;
     network_init();
 }
+
+/* Клин RX-тракта: главный цикл жив (ARP-refresh идёт), но кадры перестали
+ * доходить до RX_AVAILABLE — pbuf-стрик и флаги молчат, обычный self-heal
+ * сам не стартует. На живом бенч-LAN (фабричный маяк 10 Гц, реальные лидары)
+ * 30 с без единого кадра — достоверная аномалия: пинаем RELEASE, чистим
+ * флаги и переинициализируем lwIP. */
+#ifdef LIDARSIM_RX_STARVATION_HEAL
+static void service_rx_starvation(void)
+{
+    unsigned now = sys_now();
+
+    if (!now) {
+        return; /* время ещё не пошло: 0-метка дала бы unsigned-wrap */
+    }
+    if (!rx_last_frame_ms) {
+        rx_last_frame_ms = now;
+        return;
+    }
+#ifdef LIDARSIM_TEST_FORCE_HEAL
+    if ((now - rx_last_frame_ms) < 8u) {
+#else
+    if ((now - rx_last_frame_ms) < 30000u) {
+#endif
+        return;
+    }
+    printf("lidarsim rx starvation heal\n");
+    eth->rx_ctrl = ETH_RX_CTRL_RELEASE;
+    eth->rx_ctrl = ETH_RX_CTRL_CLEAR_FLAGS;
+    net_self_heal();
+    rx_last_frame_ms = sys_now();
+}
+#endif
 
 int main(void)
 {
@@ -3545,6 +3601,13 @@ int main(void)
         if (rx_nopbuf_streak >= 32u) {
             net_self_heal();
         }
+#ifdef LIDARSIM_RX_STARVATION_HEAL
+        /* ЭКСПЕРИМЕНТ (выключено): на железе 2026-07-03 срабатывание этого
+         * heal'а валило сеть (smoke убивал плату), хотя форс-heal в ModelSim
+         * ребиндился чисто. До railway-верификации heal-пути на железе не
+         * включать. */
+        service_rx_starvation();
+#endif
         DIAG_CTX(1);
         poll_rx_frame();
         DIAG_CTX(2);
