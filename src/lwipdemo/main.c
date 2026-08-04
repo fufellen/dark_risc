@@ -159,7 +159,8 @@
 #define LIDAR_CMD_PROP_DELAY        0x51u
 #define LIDAR_CMD_VIEW_SECTOR       0x53u
 #define LIDAR_CMD_ECHO_COUNT        0x54u
-#define LIDAR_CMD_NET_CONFIG        0x60u
+#define LIDAR_CMD_NET_CONFIG        0x60u   /* VarLen  (A1) */
+#define LIDAR_CMD_SERIAL_NUMBER     0x60u   /* FixedLen (A0) — тот же код */
 #define LIDAR_CMD_LIDAR_FIRMWARE    0x7eu
 
 #define FW_CMD_CPU_PRG_BEGIN        55u
@@ -999,6 +1000,10 @@ static void apply_net_config_payload(const unsigned char *payload, unsigned len)
     print_config();
 }
 
+/* серийный номер живёт во FLASH, работа с ней объявлена ниже по файлу */
+static unsigned serial_number;
+static unsigned serial_store(void);
+
 static void fill_fixed_payload(unsigned cmd, unsigned rw,
                                const unsigned char *request,
                                unsigned char payload[16])
@@ -1031,6 +1036,11 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
             copy_bytes(runtime_config.mac, request, 6);
             if (netif_configured) {
                 apply_netif_config();
+            }
+        } else if (cmd == LIDAR_CMD_SERIAL_NUMBER) {
+            serial_number = read_le32(request);
+            if (!serial_store()) {
+                printf("lidarsim serial store fail\n");
             }
         }
         return;
@@ -1074,6 +1084,9 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
         break;
     case LIDAR_CMD_LIDAR_ACTION:
         payload[0] = 0;
+        break;
+    case LIDAR_CMD_SERIAL_NUMBER:
+        write_le32(payload, serial_number);
         break;
     case LIDAR_CMD_NET_IP:
         copy_bytes(payload, runtime_config.ip, 4);
@@ -1561,6 +1574,36 @@ static unsigned flash_erase_sector(unsigned addr)
         return 0;
     }
     return flash_erase_cmd(0x20u, addr & ~(FW_FLASH_SECTOR_SIZE - 1u), 1000u);
+}
+
+/* Серийный номер (команда 0x60 FixedLen; 0x60 VarLen — это NET_CONFIG).
+ * Живёт в последнем секторе FLASH: образ ПЛИС занимает начало и до него
+ * не достаёт, поэтому номер переживает и перезагрузку, и заливку прошивки. */
+#define SERIAL_FLASH_ADDR 0x3ff000u
+#define SERIAL_MAGIC      0x4e524553u   /* "SERN" */
+
+static void serial_load(void)
+{
+    unsigned char buf[8];
+
+    if (!flash_read_bytes(SERIAL_FLASH_ADDR, buf, sizeof(buf))) {
+        return;
+    }
+    if (read_le32(buf) == SERIAL_MAGIC) {
+        serial_number = read_le32(buf + 4);
+    }
+}
+
+static unsigned serial_store(void)
+{
+    unsigned char buf[8];
+
+    write_le32(buf, SERIAL_MAGIC);
+    write_le32(buf + 4, serial_number);
+    if (!flash_erase_sector(SERIAL_FLASH_ADDR)) {
+        return 0;
+    }
+    return flash_page_program(SERIAL_FLASH_ADDR, buf, sizeof(buf));
 }
 
 static void fill_flash_spi_fixed_payload(const unsigned char *request,
@@ -2541,6 +2584,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         reply[24] = 0x9b;
         err_t ack_err = send_udp_broadcast_bytes(pcb, port, reply,
                                                  sizeof(reply));
+        (void)ack_err;   /* используется только в LOGV-сборке */
         LOGV("lidarsim action=%d ack=%d\n", action, ack_err);
         if (action == 0u) {
             /* «перезагрузка»: имитатору достаточно свежей сессии
@@ -3859,6 +3903,8 @@ int main(void)
      * ARP-refresh и sys_check_timeouts() не работают. 1 Гц IRQ-делитель. */
     io->timer = io->board_cm * 2000000u - 1u;
     printf("lidarsim start\n");
+    firmware_session.mock_flash = (io->board_id == 0u);
+    serial_load();
 
     lwip_init();
     print_config();
