@@ -575,6 +575,29 @@ module darksocv #(
 
 `else
 
+`ifdef DARKXRAM_CS3
+
+    // Свободный слот отдан под дополнительную память данных: линкер уводит
+    // туда стек и .bss, освобождая основную BRAM под код.
+    darkxram #(
+        .XLEN                   (`DARKXRAM_LEN)
+    ) xram0
+    (
+        .CLK                    (CLK),
+        .RES                    (RES),
+
+        .XDREQ                  (XDREQMUX[3]),
+        .XRD                    (XRD),
+        .XWR                    (XWR),
+        .XBE                    (XBE),
+        .XADDR                  (XADDR),
+        .XATAI                  (XATAO),
+        .XATAO                  (XATAIMUX[3]),
+        .XDACK                  (XDACKMUX[3])
+    );
+
+`else
+
     reg [3:0] DTACK3 = 0;
     reg PRINT3 = 1;
 
@@ -592,6 +615,8 @@ module darksocv #(
 
     assign XATAIMUX[3] = 32'hdeadbeef;
     assign XDACKMUX[3] = DTACK3==1;
+
+`endif
 
 `endif
 

@@ -34,6 +34,9 @@ MEMORY
     */
 
     MEM (rwx)  : ORIGIN = 0x00000000, LENGTH = MLEN
+    /* darkxram на слоте XADDR[31:30]==3: сюда уходят .bss и стек,
+       иначе стек упирается в .bss и остаются сотни байт */
+    XRAM (rw)  : ORIGIN = 0xC0000000, LENGTH = 16K
 }
 
 SECTIONS
@@ -58,7 +61,6 @@ SECTIONS
         *(.data*)
         _global = . + 0x800;
         *(.sbss*)    
-        *(.bss*)
         *(.sdata*)
         *(.*)
         . = ALIGN(4);
@@ -66,5 +68,13 @@ SECTIONS
 
     } > MEM
 
-   PROVIDE ( _stack = ORIGIN(MEM) + LENGTH(MEM) );
+    .bss (NOLOAD) :
+    {
+        _bss = .;
+        *(.bss*)
+        *(COMMON)
+        . = ALIGN(4);
+        _ebss = .;
+    } > XRAM
+   PROVIDE ( _stack = ORIGIN(XRAM) + LENGTH(XRAM) );
 }

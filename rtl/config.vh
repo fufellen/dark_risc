@@ -284,6 +284,11 @@
 // size as the same.
 // The size is defined as 2**MLEN, i.e. the address bits used in the memory.
 // WARNING: this setup must match with the src/darksocv.ld.src file!
+// Дополнительная память данных на свободном слоте XADDR[31:30]==3:
+// линкер уводит туда стек и .bss, освобождая 2**MLEN под код.
+`define DARKXRAM_CS3
+`define DARKXRAM_LEN 14   // 16 КиБ
+
 `define MLEN 16 // 13: 8kB for darkshell
                 // 15: 32kB, for coremark
                 // 16: 64kB, for LwIP TCP lidar simulator
