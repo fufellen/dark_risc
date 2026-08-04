@@ -156,6 +156,19 @@
 #define LIDAR_CMD_TEMPERATURE_PD    0x25u
 #define LIDAR_CMD_PRESET_PD         0x26u
 #define LIDAR_CMD_TEMPERATURE_TDC   0x27u
+/* служебные калибровки и делители измерения напряжений: лидарного железа за
+ * ними нет, но lconf их шлёт, и молчание неотличимо от неисправности */
+#define LIDAR_CMD_VCAL_APD          0x29u
+#define LIDAR_CMD_VCAL_LSR          0x2au
+#define LIDAR_CMD_VSENSE_VIN        0x2bu
+#define LIDAR_CMD_VSENSE_5V         0x2cu
+#define LIDAR_CMD_VSENSE_12V        0x2du
+#define LIDAR_CMD_VSENSE_HVAPD      0x2eu
+#define LIDAR_CMD_VSENSE_HVLSR      0x2fu
+#define LIDAR_CMD_DEBUG_PACKET      0x44u
+#define LIDAR_CMD_NTP_SYNC          0x4bu
+#define LIDAR_CMD_LIDAR_POSITION    0x55u
+#define LIDAR_CMD_MCU_FIRMWARE      0x7du
 #define LIDAR_CMD_LIDAR_CMD         0x30u
 #define LIDAR_CMD_LIDAR_ACTION      0x31u
 #define LIDAR_CMD_NET_IP            0x40u
@@ -1011,6 +1024,24 @@ static void apply_net_config_payload(const unsigned char *payload, unsigned len)
     print_config();
 }
 
+/* Служебные поля боевого протокола: имитатор хранит их и отдаёт обратно. */
+static unsigned char vsense_cfg[5][12];   /* VIN, 5V, 12V, HVAPD, HVLSR */
+static unsigned vcal_apd, vcal_lsr;
+static unsigned ntp_time_s, ntp_time_us;
+static unsigned lidar_position_mgrad;
+
+static int vsense_slot(unsigned cmd)
+{
+    switch (cmd) {
+    case LIDAR_CMD_VSENSE_VIN:   return 0;
+    case LIDAR_CMD_VSENSE_5V:    return 1;
+    case LIDAR_CMD_VSENSE_12V:   return 2;
+    case LIDAR_CMD_VSENSE_HVAPD: return 3;
+    case LIDAR_CMD_VSENSE_HVLSR: return 4;
+    default:                     return -1;
+    }
+}
+
 /* серийный номер живёт во FLASH, работа с ней объявлена ниже по файлу */
 static unsigned serial_number;
 static unsigned serial_store(void);
@@ -1048,6 +1079,17 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
             if (netif_configured) {
                 apply_netif_config();
             }
+        } else if (cmd == LIDAR_CMD_VCAL_APD) {
+            vcal_apd = read_le32(request);
+        } else if (cmd == LIDAR_CMD_VCAL_LSR) {
+            vcal_lsr = read_le32(request);
+        } else if (cmd == LIDAR_CMD_NTP_SYNC) {
+            ntp_time_s = read_le32(request);
+            ntp_time_us = read_le32(request + 4);
+        } else if (cmd == LIDAR_CMD_LIDAR_POSITION) {
+            lidar_position_mgrad = read_le32(request);
+        } else if (vsense_slot(cmd) >= 0) {
+            copy_bytes(vsense_cfg[vsense_slot(cmd)], request, 12);
         } else if (cmd == LIDAR_CMD_SERIAL_NUMBER) {
             serial_number = read_le32(request);
             if (!serial_store()) {
@@ -1098,6 +1140,28 @@ static void fill_fixed_payload(unsigned cmd, unsigned rw,
         break;
     case LIDAR_CMD_SERIAL_NUMBER:
         write_le32(payload, serial_number);
+        break;
+    case LIDAR_CMD_VCAL_APD:
+        write_le32(payload, vcal_apd);
+        break;
+    case LIDAR_CMD_VCAL_LSR:
+        write_le32(payload, vcal_lsr);
+        break;
+    case LIDAR_CMD_NTP_SYNC:
+        write_le32(payload, ntp_time_s);
+        write_le32(payload + 4, ntp_time_us);
+        break;
+    case LIDAR_CMD_LIDAR_POSITION:
+        write_le32(payload, lidar_position_mgrad);
+        break;
+    case LIDAR_CMD_DEBUG_PACKET:
+        break;   /* приняли и подтвердили, полезной нагрузки нет */
+    case LIDAR_CMD_VSENSE_VIN:
+    case LIDAR_CMD_VSENSE_5V:
+    case LIDAR_CMD_VSENSE_12V:
+    case LIDAR_CMD_VSENSE_HVAPD:
+    case LIDAR_CMD_VSENSE_HVLSR:
+        copy_bytes(payload, vsense_cfg[vsense_slot(cmd)], 12);
         break;
     case LIDAR_CMD_NET_IP:
         copy_bytes(payload, runtime_config.ip, 4);
@@ -1170,7 +1234,10 @@ static unsigned build_control_reply(unsigned proto_type,
                                                  out + 9,
                                                  LIDARSIM_CONTROL_REPLY_MAX - 11u);
             write_le16(out + 7, len);
-        } else if (cmd == LIDAR_CMD_LIDAR_FIRMWARE && rw == LIDAR_PROTO_READ) {
+        } else if ((cmd == LIDAR_CMD_LIDAR_FIRMWARE ||
+                    cmd == LIDAR_CMD_MCU_FIRMWARE) &&
+                   rw == LIDAR_PROTO_READ) {
+            /* у имитатора МК и ПЛИС — одна прошивка, версия общая */
             static const char fw[] = LIDARSIM_FIRMWARE;
             len = sizeof(fw) - 1u;
             write_le16(out + 7, len);
