@@ -3595,6 +3595,20 @@ static void handle_uart_command(char *line)
             printf(" %x", win[offs[i] / 4u]);
         }
         printf("\n");
+        #ifdef LIDARSIM_DDR3_DIAG
+        /* перекрёстная проверка: те же ячейки регистровым путём (адрес там —
+         * индекс 16-битных слов, byte_off/2) + запись регистром, чтение окном */
+        for (unsigned i = 0; i < 4u; i++) {
+            unsigned v = 0;
+            if (ddr3_read32(offs[i] / 2u, &v) == 0) {
+                printf("reg[%x]=%x\n", offs[i], v);
+            }
+        }
+        if (ddr3_write32(0x2000u / 2u, 0x5117beefu) == 0) {
+            printf("regwr ok win=%x\n", win[0x2000u / 4u]);
+        }
+        printf("ddr3 st=%x\n", ddr3->status);
+#endif
         return;
     }
 
