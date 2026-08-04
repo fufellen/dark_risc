@@ -26,6 +26,7 @@ module darkddr3_mmio_tb;
     logic RES = 1'b1;
 
     logic XDREQ = 1'b0;
+    logic XWINDOW = 1'b0;   // 0 = регистры, 1 = прозрачное окно
     logic XRD = 1'b0;
     logic XWR = 1'b0;
     logic [3:0] XBE = 4'hf;
@@ -60,6 +61,7 @@ module darkddr3_mmio_tb;
         .CLK(CLK),
         .RES(RES),
         .XDREQ(XDREQ),
+        .XWINDOW(XWINDOW),
         .XRD(XRD),
         .XWR(XWR),
         .XBE(XBE),
@@ -163,6 +165,31 @@ module darkddr3_mmio_tb;
         end
     endtask
 
+    /* Прозрачное окно: адаптер держит XDACK до готовности данных, поэтому
+     * ждать его надо и на записи тоже — в отличие от регистрового доступа. */
+    task automatic win_write(input logic [31:0] addr, input logic [31:0] data);
+        begin
+            @(posedge CLK);
+            XADDR <= addr; XATAI <= data; XWINDOW <= 1'b1;
+            XRD <= 1'b0; XWR <= 1'b1; XDREQ <= 1'b1;
+            do @(posedge CLK); while (!XDACK);
+            XWR <= 1'b0; XDREQ <= 1'b0; XWINDOW <= 1'b0;
+            @(posedge CLK);
+        end
+    endtask
+
+    task automatic win_read(input logic [31:0] addr, output logic [31:0] data);
+        begin
+            @(posedge CLK);
+            XADDR <= addr; XWINDOW <= 1'b1;
+            XRD <= 1'b1; XWR <= 1'b0; XDREQ <= 1'b1;
+            do @(posedge CLK); while (!XDACK);
+            data = XATAO;
+            XRD <= 1'b0; XDREQ <= 1'b0; XWINDOW <= 1'b0;
+            @(posedge CLK);
+        end
+    endtask
+
     task automatic check_equal(input logic [31:0] got, input logic [31:0] exp, input string what);
         begin
             if (got !== exp) begin
@@ -246,6 +273,19 @@ module darkddr3_mmio_tb;
                     "write queued during refresh");
         check_equal({16'd0, mem[8'h30]}, 32'h0000_babe, "queued write lower half");
         check_equal({16'd0, mem[8'h31]}, 32'h0000_cafe, "queued write upper half");
+
+        begin
+            logic [31:0] win_got;
+            win_write(32'h0000_0010, 32'ha5a5_1234);
+            win_read(32'h0000_0010, win_got);
+            check_equal(win_got, 32'ha5a5_1234, "window rw");
+            win_write(32'h0000_0020, 32'h0f0f_5678);
+            win_read(32'h0000_0020, win_got);
+            check_equal(win_got, 32'h0f0f_5678, "window rw 2");
+            win_read(32'h0000_0010, win_got);
+            check_equal(win_got, 32'ha5a5_1234, "window keep");
+            $display("window transparent access ok");
+        end
 
         $display("TEST PASS: darkddr3_mmio");
         $finish;

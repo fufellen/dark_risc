@@ -84,13 +84,30 @@ module darkddr3_mmio #(
     wire init_done = ddr_write_level_done && ddr_read_calib_done;
     wire op_busy = (state != ST_IDLE) || pending_read || pending_write || pending_refresh;
     wire ready_for_cmd = init_done && !ddr_busy && !op_busy && !refresh_pending;
-    wire read_start = XDREQ && XRD && (dtack == 0);
-    wire write_start = XDREQ && XWR;
+    /* Прозрачное окно (XWINDOW, 0xD0000000): обращение адресует память, а не
+     * регистры. Вся логика окна живёт в ОДНОМ always с автоматом: в разных
+     * блоках op_done виден с разным опозданием, и завершение транзакции
+     * теряется — окно уходит в таймаут при исправном контроллере. */
+    localparam int unsigned WIN_TIMEOUT_CYCLES = 4096;
+
+    logic win_active = 1'b0;
+    logic win_is_write = 1'b0;
+    logic win_ack = 1'b0;
+    logic win_timeout_err = 1'b0;
+    logic win_done_d = 1'b0;
+    logic [15:0] win_timeout = 16'd0;
+
+    wire reg_req = XDREQ && !XWINDOW;
+    wire win_req = XDREQ && XWINDOW;
+
+    wire read_start = reg_req && XRD && (dtack == 0);
+    wire write_start = reg_req && XWR;
     wire [3:0] reg_addr = XADDR[5:2];
     wire pending_any = pending_read || pending_write || pending_refresh;
     wire state_accepts_start = (state == ST_IDLE) || (state == ST_REFRESH_WAIT);
+    wire win_can_start = init_done && state_accepts_start && !pending_any;
 
-    assign XDACK = (dtack == 1) || write_start;
+    assign XDACK = (dtack == 1) || write_start || win_ack;
 
     always_ff @(posedge CLK) begin
         if (RES) begin
@@ -111,6 +128,12 @@ module darkddr3_mmio #(
             cmd_addr <= '0;
             cmd_wdata <= 32'd0;
             cmd_rdata <= 32'd0;
+            win_active <= 1'b0;
+            win_is_write <= 1'b0;
+            win_ack <= 1'b0;
+            win_timeout <= 16'd0;
+            win_timeout_err <= 1'b0;
+            win_done_d <= 1'b0;
             pending_read <= 1'b0;
             pending_write <= 1'b0;
             pending_refresh <= 1'b0;
@@ -132,6 +155,54 @@ module darkddr3_mmio #(
                     refresh_pending <= 1'b1;
                 end else begin
                     refresh_counter <= refresh_counter + 1'b1;
+                end
+            end
+
+            win_ack <= 1'b0;
+
+            if (win_active) begin
+                win_timeout <= win_timeout + 1'b1;
+
+                if (op_done && !win_done_d) begin
+                    /* cmd_rdata пишется автоматом ЭТИМ же фронтом, поэтому
+                     * отдавать его сразу нельзя — получим прошлое значение.
+                     * Ждём один такт, потом закрываем транзакцию. */
+                    win_done_d <= 1'b1;
+                end else if (win_done_d) begin
+`ifdef SIMULATION
+                    $display("t=%0t WIN FINISH wr=%b rdata=%h", $time, win_is_write, cmd_rdata);
+`endif
+                    if (!win_is_write) begin
+                        XATAO <= cmd_rdata;
+                    end
+                    op_done <= 1'b0;
+                    win_done_d <= 1'b0;
+                    win_active <= 1'b0;
+                    win_ack <= 1'b1;
+                end else if (win_timeout >= WIN_TIMEOUT_CYCLES[15:0]) begin
+                    /* контроллер не ответил: отпускаем шину и поднимаем флаг,
+                     * иначе процессор встанет навсегда */
+                    win_active <= 1'b0;
+                    win_ack <= 1'b1;
+                    win_timeout_err <= 1'b1;
+`ifdef SIMULATION
+                    $display("t=%0t WIN TIMEOUT wr=%b", $time, win_is_write);
+`endif
+                end
+            end else if (win_req && (XRD || XWR) && win_can_start && !win_ack) begin
+                /* адрес CPU байтовый, контроллер адресует 16-битные слова:
+                 * одно слово CPU = два слова DDR, начиная с чётного индекса */
+                cmd_addr <= {XADDR[DDR_ADDR_WIDTH-1:2], 1'b0};
+                op_done <= 1'b0;
+                win_active <= 1'b1;
+                win_is_write <= XWR;
+                win_timeout <= 16'd0;
+                win_done_d <= 1'b0;
+                if (XWR) begin
+                    cmd_wdata <= XATAI;
+                    pending_write <= 1'b1;
+                end else begin
+                    pending_read <= 1'b1;
                 end
             end
 
