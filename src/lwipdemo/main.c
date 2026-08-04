@@ -98,7 +98,7 @@
 #endif
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_DISTANCE_BYTES 2u
-#define LIDARSIM_MSOP_INTENSITY_BYTES 0u
+#define LIDARSIM_MSOP_INTENSITY_BYTES 1u
 #define LIDARSIM_MSOP_ECHO_COUNT  2u
 #define LIDARSIM_MSOP_ECHO_MODE   3u
 #define LIDARSIM_MSOP_POINT_BYTES \
@@ -133,6 +133,7 @@
 #define LIDARSIM_PSRAM_MSOP_BASE  0x00001000u
 #define LIDARSIM_PSRAM_MSOP_STRIDE 1024u
 #define LIDARSIM_PIG_PERIOD_MS    1500u
+#define LIDARSIM_PIG_BREATH_MS    2000u
 
 #define LIDAR_DISCOVERY_RESPONSE_SIZE 80u
 #define LIDAR_DISCOVERY_REQUEST_SIZE  17u
@@ -3075,12 +3076,6 @@ static void service_arp_refresh(void)
     etharp_request(&fpga_netif, &host);
 }
 
-static unsigned angle_distance_deg(unsigned angle_deg, unsigned center_deg)
-{
-    unsigned diff = (angle_deg >= center_deg) ?
-        (angle_deg - center_deg) : (center_deg - angle_deg);
-    return (diff > 180u) ? (360u - diff) : diff;
-}
 
 static unsigned rotate_angle_deg(unsigned angle_deg, unsigned phase_deg)
 {
@@ -3154,30 +3149,16 @@ static unsigned pig_snout_distance_mm(unsigned angle_deg, unsigned phase_deg)
     return shape_unit << 3;
 }
 
-static unsigned pig_head_intensity(unsigned angle_deg, unsigned phase_deg,
-                                   unsigned frame_num)
+/* Дыхание интенсивности: тело свиньи линейно 0->255->0 за период,
+ * пятачок в противофазе 255->0->255. Треугольная волна от sys_now(). */
+static unsigned pig_breath_intensity(unsigned now_ms)
 {
-    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned value = 50u + ((angle_deg + frame_num) & 0x1fu);
-
-    if (angle_distance_deg(a, 60u) <= 20u ||
-        angle_distance_deg(a, 120u) <= 20u) {
-        value = 112u + ((frame_num + angle_deg) & 0x1fu);
+    unsigned p = now_ms % LIDARSIM_PIG_BREATH_MS;
+    unsigned half = LIDARSIM_PIG_BREATH_MS / 2u;
+    if (p < half) {
+        return (255u * p) / half;
     }
-
-    return value;
-}
-
-static unsigned pig_snout_intensity(unsigned angle_deg, unsigned phase_deg,
-                                    unsigned frame_num)
-{
-    unsigned a = rotate_angle_deg(angle_deg, phase_deg);
-    unsigned diff = angle_distance_deg(a, 270u);
-
-    if (diff <= 10u) {
-        return 205u + ((frame_num + angle_deg) & 0x1fu);
-    }
-    return 168u + ((frame_num + angle_deg) & 0x1fu);
+    return (255u * (LIDARSIM_PIG_BREATH_MS - p)) / half;
 }
 
 static unsigned pig_head_phase_deg(unsigned now_ms)
@@ -3191,6 +3172,8 @@ static unsigned build_msop_packet(unsigned char *out)
     unsigned pos = 0;
     unsigned now = sys_now();
     unsigned phase = pig_head_phase_deg(now);
+    unsigned head_int = pig_breath_intensity(now);
+    unsigned snout_int = 255u - head_int;
 
     out[pos++] = 0xff;
     out[pos++] = 0xfe;
@@ -3219,16 +3202,14 @@ static unsigned build_msop_packet(unsigned char *out)
         write_msop_distance(out + pos, head_dist);
         pos += LIDARSIM_MSOP_DISTANCE_BYTES;
         if (LIDARSIM_MSOP_INTENSITY_BYTES) {
-            out[pos++] = (unsigned char)
-                pig_head_intensity(angle_deg, phase, msop_frame_num);
+            out[pos++] = (unsigned char)head_int;
         }
 
         write_msop_distance(out + pos, snout_dist);
         pos += LIDARSIM_MSOP_DISTANCE_BYTES;
         if (LIDARSIM_MSOP_INTENSITY_BYTES) {
             out[pos++] = (snout_dist == LIDARSIM_MSOP_INVALID_DISTANCE) ? 0u :
-                (unsigned char)pig_snout_intensity(angle_deg, phase,
-                                                   msop_frame_num);
+                (unsigned char)snout_int;
         }
     }
 

@@ -83,11 +83,13 @@
 #define TCP_MSS                         512
 #define TCP_WND                         TCP_MSS
 #ifdef LIDARSIM_DIAG_BEACON
-#define TCP_SND_BUF                     (2 * TCP_MSS)
+/* кадр MSOP с интенсивностью = 1118 Б: 2*MSS=1024 его не пропускает */
+#define TCP_SND_BUF                     (3 * TCP_MSS)
 #define TCP_SND_QUEUELEN                4
 #define TCP_SNDQUEUELOWAT               3
 #else
-#define TCP_SND_BUF                     (2 * TCP_MSS)
+/* кадр MSOP с интенсивностью = 1118 Б: 2*MSS=1024 его не пропускает */
+#define TCP_SND_BUF                     (3 * TCP_MSS)
 #define TCP_SND_QUEUELEN                6
 #endif
 #define TCP_OVERSIZE                    0
