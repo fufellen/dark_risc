@@ -549,7 +549,11 @@ module darksocv #(
     // память данных darkxram. Свободных слотов XADDR[31:30] больше нет, а
     // держать стек и .bss в основной BRAM уже негде.
 `ifdef DARKXRAM_CS3
+    // Слот 3 делится по XADDR[29:28]:
+    //   00 = 0xC0000000 — регистры DDR3, 01 = 0xD0000000 — прозрачное окно
+    //   DDR3 (обычные load/store), 10 = 0xE0000000 — darkxram.
     wire        XRAM_SEL   = XADDR[29];
+    wire        DDR3_WIN   = XADDR[28] && !XADDR[29];
     wire [31:0] DDR3_XATAO, XRAM_XATAO;
     wire        DDR3_XDACK, XRAM_XDACK;
 
@@ -583,8 +587,10 @@ module darksocv #(
 
 `ifdef DARKXRAM_CS3
         .XDREQ                  (XDREQMUX[3] && !XRAM_SEL),
+        .XWINDOW                (DDR3_WIN),
 `else
         .XDREQ                  (XDREQMUX[3]),
+        .XWINDOW                (1'b0),
 `endif
         .XRD                    (XRD),
         .XWR                    (XWR),

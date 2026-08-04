@@ -17,6 +17,11 @@ module darkddr3_mmio #(
     input  logic        RES,
 
     input  logic        XDREQ,
+    // Признак прозрачного окна (0xD0000000): обращение адресует ПАМЯТЬ, а не
+    // регистры. Автомат прозрачного доступа ещё не написан — порт заведён,
+    // чтобы карта адресов слота 3 была цельной; пока окно ведёт себя как
+    // регистровая область, см. план в docs/skills/fpga-dev/local-gowin-lidar.md
+    input  logic        XWINDOW,
     input  logic        XRD,
     input  logic        XWR,
     input  logic [3:0]  XBE,
