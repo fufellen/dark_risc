@@ -1637,10 +1637,18 @@ static void fill_flash_spi_fixed_payload(const unsigned char *request,
         payload[1] = ok ? 0u : 105u;
         write_le24(payload + 2, addr);
         break;
-    case 3u:
-        payload[0] = (unsigned char)flash_read_status();
+    case 3u: {
+        /* CHECK_MEMORY: боевой МК кладёт в первый байт MemoryPresense
+         * (103 = OK, 105 = ERROR), а не сырой статус-регистр FLASH —
+         * именно это читают lconf --flash-dump и flash_spi_live_program.py */
+        unsigned char id[3];
+        ok = flash_read_jedec_id(id) &&
+             id[0] != 0x00u && id[0] != 0xffu;
+        payload[0] = ok ? 103u : 105u;
+        payload[1] = (unsigned char)flash_read_status();
         write_le24(payload + 2, addr);
         break;
+    }
     default:
         payload[0] = (unsigned char)op;
         payload[1] = 105u;
