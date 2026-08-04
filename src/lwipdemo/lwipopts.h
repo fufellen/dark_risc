@@ -52,57 +52,49 @@
 #elif defined(LIDARSIM_DDR3_DIAG)
 #define MEM_SIZE                        1024
 #else
-#define MEM_SIZE                        2048
+/* MSOP идёт nocopy (tcp_write flags=0), heap нужен только под
+ * заголовки/сегменты — 1024 проверено на железе в DDR3_DIAG-профиле;
+ * освобождённый килобайт ушёл потоковому загрузчику 50102 */
+#define MEM_SIZE                        1024
 #endif
 #define MEMP_MEM_MALLOC                 0
 #define MEM_LIBC_MALLOC                 0
 #define MEM_USE_POOLS                   0
 
-#define MEMP_NUM_PBUF                   8
+#define MEMP_NUM_PBUF                   6
 #define MEMP_NUM_UDP_PCB                3
 #define MEMP_NUM_TCP_PCB                4
 #define MEMP_NUM_TCP_PCB_LISTEN         3
 #ifdef LIDARSIM_DIAG_BEACON
 #define MEMP_NUM_TCP_SEG                4
-#elif defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
-#define MEMP_NUM_TCP_SEG                6
 #else
-#define MEMP_NUM_TCP_SEG                8
+#define MEMP_NUM_TCP_SEG                6
 #endif
 #define MEMP_NUM_SYS_TIMEOUT            6
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0
 #define MEMP_NUM_TCPIP_MSG_API          0
 #define MEMP_NUM_TCPIP_MSG_INPKT        0
-#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
+/* 4 x 256: RX-кадры больше ~1000 Б отбрасываются (MSOP — только TX;
+ * командные и loader-сегменты при TCP_MSS 512 занимают <=3 pbuf) */
 #define PBUF_POOL_SIZE                  4
-#else
-#define PBUF_POOL_SIZE                  6
-#endif
 #define PBUF_POOL_BUFSIZE               256
 
 #define TCP_MSS                         512
-#if defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
 #define TCP_WND                         TCP_MSS
-#else
-#define TCP_WND                         (2 * TCP_MSS)
-#endif
 #ifdef LIDARSIM_DIAG_BEACON
 #define TCP_SND_BUF                     (2 * TCP_MSS)
 #define TCP_SND_QUEUELEN                4
 #define TCP_SNDQUEUELOWAT               3
-#elif defined(LIDARSIM_DDR3_DIAG) || defined(LIDARSIM_PSRAM_MMIO)
+#else
 #define TCP_SND_BUF                     (2 * TCP_MSS)
 #define TCP_SND_QUEUELEN                6
-#else
-#define TCP_SND_BUF                     (4 * TCP_MSS)
-#define TCP_SND_QUEUELEN                8
 #endif
 #define TCP_OVERSIZE                    0
 #define TCP_LISTEN_BACKLOG              0
 #define TCP_QUEUE_OOSEQ                 0
 
-#define ARP_TABLE_SIZE                  8
+#define ARP_TABLE_SIZE                  4
 #define ETHARP_SUPPORT_STATIC_ENTRIES   1
 #define ETHARP_QUEUEING                 0
 #define ETH_PAD_SIZE                    0
