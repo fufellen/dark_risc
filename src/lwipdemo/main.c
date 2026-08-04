@@ -84,7 +84,18 @@
 #define LIDARSIM_CMD_PORT         50101u
 #define LIDARSIM_FIRMWARE_PORT    50102u
 #define LIDARSIM_MODEL            "R120_FAKE"
+/* Версию образа задаёт сборка: цепочка MULTI BOOT (working -> golden)
+ * различима только по ответу устройства — DONE=1 сам по себе не говорит,
+ * какой образ поднялся. Аварийный образ:
+ *   make ... EXTRA_CFLAGS=-DLIDARSIM_GOLDEN=1 */
+#ifndef LIDARSIM_GOLDEN
+#define LIDARSIM_GOLDEN 0
+#endif
+#if LIDARSIM_GOLDEN
+#define LIDARSIM_FIRMWARE         "golden"
+#else
 #define LIDARSIM_FIRMWARE         "pegus_1"
+#endif
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_DISTANCE_BYTES 2u
 #define LIDARSIM_MSOP_INTENSITY_BYTES 0u

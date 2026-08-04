@@ -90,6 +90,9 @@ endif
        CFLAGS += -march=$(ARCH) -mabi=$(ABI) -I$(DARKLIBC)/include -I../$(DARKLIBC)/include
        CFLAGS += -D__RISCV__ -DBUILD="\"$(BUILD)\"" -DARCH="\"$(ARCH)\"" -mno-div
        #CFLAGS += -DSDRAM
+# Дополнительные -D снаружи (вариант образа для цепочки MULTI BOOT):
+#   make ... EXTRA_CFLAGS=-DLIDARSIM_GOLDEN=1
+export CFLAGS += $(EXTRA_CFLAGS)
 export CFLAGS += -mcmodel=medany # -mexplicit-relocs # relocatable code
 export ASFLAGS = -march=$(ARCH) -mabi=$(ABI) -m$(ENDIAN)-endian
 export LDFLAGS = -T$(PROJ).ld -Map=$(PROJ).map -m $(ELFTYPE) -static -gc-sections --entry=_start # -Ttext=0
