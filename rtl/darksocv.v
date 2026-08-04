@@ -545,6 +545,35 @@ module darksocv #(
 
 `ifdef DARKDDR3_MMIO_CS3
 
+    // Слот 3 делится по XADDR[29]: 0xC0000000 — регистры DDR3, 0xE0000000 —
+    // память данных darkxram. Свободных слотов XADDR[31:30] больше нет, а
+    // держать стек и .bss в основной BRAM уже негде.
+`ifdef DARKXRAM_CS3
+    wire        XRAM_SEL   = XADDR[29];
+    wire [31:0] DDR3_XATAO, XRAM_XATAO;
+    wire        DDR3_XDACK, XRAM_XDACK;
+
+    assign XATAIMUX[3] = XRAM_SEL ? XRAM_XATAO : DDR3_XATAO;
+    assign XDACKMUX[3] = XRAM_SEL ? XRAM_XDACK : DDR3_XDACK;
+
+    darkxram #(
+        .XLEN                   (`DARKXRAM_LEN)
+    ) xram0
+    (
+        .CLK                    (CLK),
+        .RES                    (RES),
+
+        .XDREQ                  (XDREQMUX[3] && XRAM_SEL),
+        .XRD                    (XRD),
+        .XWR                    (XWR),
+        .XBE                    (XBE),
+        .XADDR                  (XADDR),
+        .XATAI                  (XATAO),
+        .XATAO                  (XRAM_XATAO),
+        .XDACK                  (XRAM_XDACK)
+    );
+`endif
+
     darkddr3_mmio #(
         .REFRESH_INTERVAL_CYCLES(`BOARD_CK / 128000)
     ) ddr30
@@ -552,14 +581,23 @@ module darksocv #(
         .CLK                    (CLK),
         .RES                    (RES),
 
+`ifdef DARKXRAM_CS3
+        .XDREQ                  (XDREQMUX[3] && !XRAM_SEL),
+`else
         .XDREQ                  (XDREQMUX[3]),
+`endif
         .XRD                    (XRD),
         .XWR                    (XWR),
         .XBE                    (XBE),
         .XADDR                  (XADDR),
         .XATAI                  (XATAO),
+`ifdef DARKXRAM_CS3
+        .XATAO                  (DDR3_XATAO),
+        .XDACK                  (DDR3_XDACK),
+`else
         .XATAO                  (XATAIMUX[3]),
         .XDACK                  (XDACKMUX[3]),
+`endif
 
         .ddr_rd                 (DDR3_UI_RD),
         .ddr_wr                 (DDR3_UI_WR),
