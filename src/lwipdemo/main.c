@@ -3581,6 +3581,23 @@ static void handle_uart_command(char *line)
         return;
     }
 
+    if (command_is(line, "ddrwin")) {
+        /* прозрачное окно DDR3: обычные load/store по 0xD0000000.
+         * Маркеры по разным адресам заодно показывают, где начинается
+         * заворот, то есть фактическую ёмкость. */
+        static const unsigned offs[4] = {0u, 0x1000u, 0x100000u, 0x1000000u};
+        volatile unsigned *win = (volatile unsigned *)0xd0000000u;
+        for (unsigned i = 0; i < 4u; i++) {
+            win[offs[i] / 4u] = 0xa5a50000u + i;
+        }
+        printf("ddrwin");
+        for (unsigned i = 0; i < 4u; i++) {
+            printf(" %x", win[offs[i] / 4u]);
+        }
+        printf("\n");
+        return;
+    }
+
 #ifdef LIDARSIM_DDR3_DIAG
     if (command_is(line, "ddr3")) {
         (void)lidarsim_ddr3_diag();

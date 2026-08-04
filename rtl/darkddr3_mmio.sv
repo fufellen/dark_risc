@@ -95,6 +95,7 @@ module darkddr3_mmio #(
     logic win_ack = 1'b0;
     logic win_timeout_err = 1'b0;
     logic win_done_d = 1'b0;
+    logic [15:0] win_wait = 16'd0;
     logic [15:0] win_timeout = 16'd0;
 
     wire reg_req = XDREQ && !XWINDOW;
@@ -134,6 +135,7 @@ module darkddr3_mmio #(
             win_timeout <= 16'd0;
             win_timeout_err <= 1'b0;
             win_done_d <= 1'b0;
+            win_wait <= 16'd0;
             pending_read <= 1'b0;
             pending_write <= 1'b0;
             pending_refresh <= 1'b0;
@@ -189,7 +191,19 @@ module darkddr3_mmio #(
                     $display("t=%0t WIN TIMEOUT wr=%b", $time, win_is_write);
 `endif
                 end
+            end else if (win_req && (XRD || XWR) && !win_ack && !win_can_start) begin
+                /* Контроллер занят или ещё не готов. Ждать молча нельзя:
+                 * XDACK не поднимется, и процессор встанет навсегда — на
+                 * железе это выглядит как мёртвый UART при живой ПЛИС.
+                 * Считаем ожидание и отпускаем шину по таймауту. */
+                win_wait <= win_wait + 1'b1;
+                if (win_wait >= WIN_TIMEOUT_CYCLES[15:0]) begin
+                    win_wait <= 16'd0;
+                    win_ack <= 1'b1;
+                    win_timeout_err <= 1'b1;
+                end
             end else if (win_req && (XRD || XWR) && win_can_start && !win_ack) begin
+                win_wait <= 16'd0;
                 /* адрес CPU байтовый, контроллер адресует 16-битные слова:
                  * одно слово CPU = два слова DDR, начиная с чётного индекса */
                 cmd_addr <= {XADDR[DDR_ADDR_WIDTH-1:2], 1'b0};
