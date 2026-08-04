@@ -108,10 +108,16 @@
 #define LIDARSIM_CONTROL_REPLY_MAX 80u
 #define LIDARSIM_FIRMWARE_BUF_MAX 160u
 #else
-#define LIDARSIM_MSOP_TX_BUFFERS  2u
+/* один MSOP-буфер (как в DDR3_DIAG): освобождает 758 Б под потоковый
+ * загрузчик и запас стека; на LAN однобуферный nocopy держит 50 к/с */
+#define LIDARSIM_MSOP_TX_BUFFERS  1u
 #define LIDARSIM_CONTROL_BUF_MAX  320u
 #define LIDARSIM_CONTROL_REPLY_MAX 320u
-#define LIDARSIM_FIRMWARE_BUF_MAX 320u
+/* актуальный lconf шлёт CpuPrgData-блоки до 1793 байт payload (кадр
+ * 1805 Б) — целиком в 64 КиБ RAM они не буферизуются, большие кадры
+ * 55/56 разбираются потоково; буфера хватает на шапку файла 512 Б
+ * внутри Begin-кадра (9 + 512) и на любой служебный кадр */
+#define LIDARSIM_FIRMWARE_BUF_MAX 576u
 #endif
 #define LIDARSIM_PSRAM_MSOP_BASE  0x00001000u
 #define LIDARSIM_PSRAM_MSOP_STRIDE 1024u
@@ -159,6 +165,8 @@
 #define FW_CMD_CPU_PRG_BEGIN        55u
 #define FW_CMD_CPU_PRG_DATA         56u
 #define FW_CMD_CPU_PRG_END          57u
+#define FW_CMD_ERASE_MCU_FLASH      58u
+#define FW_CMD_ERASE_FPGA_FLASH     59u
 #define FW_CMD_JMP_BOOT             61u
 
 #define FW_STATUS_NONE              0u
@@ -168,8 +176,20 @@
 #define FW_STATUS_REJECTED          4u
 #define FW_STATUS_UNKNOWN_COMMAND   6u
 #define FW_STATUS_ERASE_PERCENT     9u
+#define FW_STATUS_MEM_FAIL_FPGA     11u
+#define FW_STATUS_NO_MAGIC          12u
+/* не статус протокола: ответ отложен до конца стирания */
+#define FW_STATUS_DEFER             0xffu
 
-#define FW_HEADER_SIZE              256u
+/* пакет lconf: шапка 512 байт, magic по смещению 16 (FirmwarePackage:
+ * FirmwareHeaderSize = 256*2, FlashFwMagicStart = 16); секции выровнены
+ * до 256. Legacy-формат имитатора июня-2026: шапка 256, magic по 128. */
+#define FW_HEADER_SIZE              512u
+#define FW_HEADER_SIZE_LEGACY       256u
+#define FW_MAGIC_OFFSET             16u
+#define FW_MAGIC_OFFSET_LEGACY      128u
+#define FW_SECTION_ALIGN            256u
+#define FW_DATA_PAYLOAD_MAX         (1u + 7u * 256u)
 #define FW_FPGA_MAGIC               0xdeadbeefu
 #define FW_FLASH_SECTOR_SIZE        4096u
 #define FW_FLASH_BLOCK_SIZE         65536u
@@ -267,6 +287,7 @@ struct FIRMWARE_SESSION {
     unsigned active;
     unsigned mock_flash;
     unsigned stream_offset;
+    unsigned header_size;
     unsigned mcu_len;
     unsigned fpga_len;
     unsigned fpga_crc_expected;
@@ -277,6 +298,15 @@ struct FIRMWARE_SESSION {
     unsigned flash_id0;
     unsigned flash_id1;
     unsigned flash_id2;
+    /* инкрементальное стирание: по одному сектору за проход главного
+     * цикла, чтобы lwIP жил во время многосекундного erase */
+    unsigned erase_active;
+    unsigned erase_done;
+    unsigned erase_cmd;
+    unsigned erase_addr;
+    unsigned erase_size;
+    unsigned erase_last_percent;
+    unsigned erase_pkt_num;
 };
 
 static volatile struct DARKETH *eth = (volatile struct DARKETH *)DARKETH_BASE;
@@ -1645,38 +1675,23 @@ static unsigned firmware_flash_crc32(unsigned size, unsigned *crc_out)
     return 1;
 }
 
-static unsigned firmware_flash_erase(struct FIRMWARE_CONN *conn,
-                                     unsigned pkt_num,
+static unsigned firmware_erase_start(unsigned cmd, unsigned pkt_num,
                                      unsigned size)
 {
     unsigned erase_size = (size + FW_FLASH_SECTOR_SIZE - 1u) &
                           ~(FW_FLASH_SECTOR_SIZE - 1u);
-    unsigned addr = 0;
-    unsigned last_percent = 101u;
 
     if (erase_size == 0u || erase_size > FW_FLASH_MAX_SIZE) {
         return 0;
     }
 
-    while (addr < erase_size) {
-        unsigned step = FW_FLASH_SECTOR_SIZE;
-        unsigned ok = flash_erase_cmd(0x20u, addr, 5000u);
-
-        if (!ok) {
-            printf("fwloader erase fail addr=%x\n", addr);
-            return 0;
-        }
-
-        addr += step;
-        unsigned percent = (addr >= erase_size) ? 100u :
-            ((addr * 100u) / erase_size);
-        if (last_percent == 101u || percent == 100u ||
-            percent >= last_percent + FW_FLASH_ERASE_PROGRESS_STEP) {
-            firmware_send_status(conn, pkt_num, FW_CMD_CPU_PRG_BEGIN,
-                                 FW_STATUS_ERASE_PERCENT, percent, 1);
-            last_percent = percent;
-        }
-    }
+    firmware_session.erase_active = 1;
+    firmware_session.erase_done = 0;
+    firmware_session.erase_cmd = cmd;
+    firmware_session.erase_addr = 0;
+    firmware_session.erase_size = erase_size;
+    firmware_session.erase_last_percent = 101u;
+    firmware_session.erase_pkt_num = pkt_num;
     return 1;
 }
 
@@ -1684,6 +1699,7 @@ static void firmware_session_clear(void)
 {
     firmware_session.active = 0;
     firmware_session.stream_offset = 0;
+    firmware_session.header_size = 0;
     firmware_session.mcu_len = 0;
     firmware_session.fpga_len = 0;
     firmware_session.fpga_crc_expected = 0;
@@ -1691,6 +1707,13 @@ static void firmware_session_clear(void)
     firmware_session.fpga_end = 0;
     firmware_session.bytes_written = 0;
     firmware_session.crc_state = 0xffffffffu;
+    firmware_session.erase_active = 0;
+    firmware_session.erase_done = 0;
+    firmware_session.erase_cmd = 0;
+    firmware_session.erase_addr = 0;
+    firmware_session.erase_size = 0;
+    firmware_session.erase_last_percent = 101u;
+    firmware_session.erase_pkt_num = 0;
 }
 
 static unsigned firmware_process_stream_data(const unsigned char *data,
@@ -1728,51 +1751,77 @@ static unsigned firmware_process_stream_data(const unsigned char *data,
 static unsigned firmware_begin(struct FIRMWARE_CONN *conn, unsigned pkt_num,
                                const unsigned char *data, unsigned len)
 {
-    if (len < FW_HEADER_SIZE) {
+    unsigned header_size;
+    (void)conn;
+
+    /* формат lconf: шапка 512 c magic по смещению 16; legacy: 256/128 */
+    if (len >= FW_HEADER_SIZE &&
+        read_le32(data + FW_MAGIC_OFFSET) == FW_FPGA_MAGIC) {
+        header_size = FW_HEADER_SIZE;
+    } else if (len >= FW_HEADER_SIZE_LEGACY &&
+               read_le32(data + FW_MAGIC_OFFSET_LEGACY) == FW_FPGA_MAGIC) {
+        header_size = FW_HEADER_SIZE_LEGACY;
+    } else if (len >= FW_HEADER_SIZE_LEGACY) {
+        return FW_STATUS_NO_MAGIC;
+    } else {
         return FW_STATUS_WRONG_CONFIG;
     }
 
-    firmware_session_clear();
-    firmware_session.mock_flash = (io->board_id == 0u);
-    firmware_session.mcu_len = read_le32(data + 0);
-    firmware_session.fpga_len = read_le32(data + 8);
-    firmware_session.fpga_crc_expected = read_le32(data + 12);
-    unsigned magic = read_le32(data + 128);
+    unsigned mcu_len = read_le32(data + 0);
+    unsigned fpga_len = read_le32(data + 8);
+    unsigned fpga_crc = read_le32(data + 12);
 
-    if (firmware_session.fpga_len == 0u ||
-        firmware_session.fpga_len > FW_FLASH_MAX_SIZE ||
-        (firmware_session.mcu_len & (FW_HEADER_SIZE - 1u)) != 0u ||
-        (firmware_session.fpga_len & (FW_HEADER_SIZE - 1u)) != 0u ||
-        magic != FW_FPGA_MAGIC) {
+    if (fpga_len == 0u ||
+        fpga_len > FW_FLASH_MAX_SIZE ||
+        (mcu_len & (FW_SECTION_ALIGN - 1u)) != 0u ||
+        (fpga_len & (FW_SECTION_ALIGN - 1u)) != 0u) {
         return FW_STATUS_WRONG_CONFIG;
     }
 
-    firmware_session.fpga_start = FW_HEADER_SIZE + firmware_session.mcu_len;
-    firmware_session.fpga_end = firmware_session.fpga_start + firmware_session.fpga_len;
+    if (!firmware_session.erase_done) {
+        firmware_session_clear();
+        firmware_session.mock_flash = (io->board_id == 0u);
+
+        unsigned char id[3];
+        if (!flash_read_jedec_id(id)) {
+            printf("fwloader flash id fail\n");
+            return FW_STATUS_REJECTED;
+        }
+        firmware_session.flash_id0 = id[0];
+        firmware_session.flash_id1 = id[1];
+        firmware_session.flash_id2 = id[2];
+        printf("fwloader begin mock=%d flash_id=%x%x%x hdr=%d fpga=%d crc=%x\n",
+               firmware_session.mock_flash, id[0], id[1], id[2],
+               header_size, fpga_len, fpga_crc);
+
+        if (!firmware_session.mock_flash) {
+            /* стирание идёт по сектору за проход главного цикла;
+             * Begin-пакет остаётся в буфере и разбирается повторно
+             * после завершения (см. service_firmware_erase) */
+            if (!firmware_erase_start(FW_CMD_CPU_PRG_BEGIN, pkt_num,
+                                      fpga_len)) {
+                return FW_STATUS_WRONG_CONFIG;
+            }
+            return FW_STATUS_DEFER;
+        }
+    }
+
+    firmware_session.erase_done = 0;
+    firmware_session.header_size = header_size;
+    firmware_session.mcu_len = mcu_len;
+    firmware_session.fpga_len = fpga_len;
+    firmware_session.fpga_crc_expected = fpga_crc;
+    firmware_session.fpga_start = header_size + mcu_len;
+    firmware_session.fpga_end = firmware_session.fpga_start + fpga_len;
     if (firmware_session.fpga_end < firmware_session.fpga_start) {
+        firmware_session_clear();
         return FW_STATUS_WRONG_CONFIG;
-    }
-
-    unsigned char id[3];
-    if (!flash_read_jedec_id(id)) {
-        printf("fwloader flash id fail\n");
-        return FW_STATUS_REJECTED;
-    }
-
-    firmware_session.flash_id0 = id[0];
-    firmware_session.flash_id1 = id[1];
-    firmware_session.flash_id2 = id[2];
-    printf("fwloader begin mock=%d flash_id=%x%x%x fpga=%d crc=%x\n",
-           firmware_session.mock_flash, id[0], id[1], id[2],
-           firmware_session.fpga_len, firmware_session.fpga_crc_expected);
-
-    if (!firmware_flash_erase(conn, pkt_num, firmware_session.fpga_len)) {
-        printf("fwloader erase fail\n");
-        return FW_STATUS_REJECTED;
     }
 
     firmware_session.active = 1;
     firmware_session.stream_offset = 0;
+    firmware_session.bytes_written = 0;
+    firmware_session.crc_state = 0xffffffffu;
     if (!firmware_process_stream_data(data, len)) {
         firmware_session_clear();
         return FW_STATUS_REJECTED;
@@ -1818,6 +1867,7 @@ static unsigned firmware_end(void)
     return FW_STATUS_NONE;
 }
 
+/* служебные (короткие) кадры; Begin/Data идут через потоковый разбор */
 static void firmware_process_payload(struct FIRMWARE_CONN *conn,
                                      unsigned pkt_num,
                                      const unsigned char *payload,
@@ -1828,23 +1878,32 @@ static void firmware_process_payload(struct FIRMWARE_CONN *conn,
     }
 
     unsigned cmd = payload[0];
-    const unsigned char *data = payload + 1;
-    unsigned data_len = payload_len - 1u;
     unsigned status = FW_STATUS_NONE;
 
     if (cmd == FW_CMD_JMP_BOOT) {
         firmware_session_clear();
         printf("fwloader boot\n");
-    } else if (cmd == FW_CMD_CPU_PRG_BEGIN) {
-        status = firmware_begin(conn, pkt_num, data, data_len);
-    } else if (cmd == FW_CMD_CPU_PRG_DATA) {
-        if (!firmware_session.active) {
-            status = FW_STATUS_REJECTED;
-        } else if (!firmware_process_stream_data(data, data_len)) {
-            status = FW_STATUS_REJECTED;
-        }
     } else if (cmd == FW_CMD_CPU_PRG_END) {
         status = firmware_end();
+    } else if (cmd == FW_CMD_ERASE_MCU_FLASH) {
+        /* секции МК у имитатора нет — стирать нечего */
+        firmware_session_clear();
+    } else if (cmd == FW_CMD_ERASE_FPGA_FLASH) {
+        firmware_session_clear();
+        firmware_session.mock_flash = (io->board_id == 0u);
+        unsigned char id[3];
+        if (!flash_read_jedec_id(id)) {
+            status = FW_STATUS_REJECTED;
+        } else if (!firmware_session.mock_flash) {
+            unsigned capacity = (id[2] >= 16u && id[2] <= 24u)
+                ? (1u << id[2]) : FW_FLASH_MAX_SIZE;
+            if (firmware_erase_start(FW_CMD_ERASE_FPGA_FLASH, pkt_num,
+                                     capacity)) {
+                /* ответ [59, 0] уйдёт из service_firmware_erase */
+                return;
+            }
+            status = FW_STATUS_WRONG_CONFIG;
+        }
     } else {
         status = FW_STATUS_UNKNOWN_COMMAND;
     }
@@ -1866,7 +1925,7 @@ static unsigned firmware_packet_size(const unsigned char *buf, unsigned len)
 
     unsigned payload_len = read_le16(buf + 2);
     unsigned packet_len = 2u + 2u + 4u + payload_len + 2u + 2u;
-    if (payload_len > (FW_FLASH_PAGE_SIZE + 1u) ||
+    if (payload_len > FW_DATA_PAYLOAD_MAX ||
         packet_len > LIDARSIM_FIRMWARE_BUF_MAX) {
         return 1u;
     }
@@ -1883,39 +1942,256 @@ static unsigned firmware_packet_size(const unsigned char *buf, unsigned len)
     return (expected == actual) ? packet_len : 1u;
 }
 
+/* потоковый разбор кадров загрузчика: кадры Begin/Data длиннее буфера
+ * (до 1805 байт у актуального lconf) льются во FLASH на лету */
+#define FW_STREAM_IDLE   0u  /* копим кадр/шапку кадра в conn->buf */
+#define FW_STREAM_BEGIN  1u  /* Begin: копим шапку файла для проверки */
+#define FW_STREAM_DATA   2u  /* payload идёт в firmware_process_stream_data */
+#define FW_STREAM_TAIL   3u  /* собираем 55 AA + checksum16 */
+
+static struct {
+    unsigned mode;
+    unsigned cmd;
+    unsigned pkt_num;
+    unsigned payload_left;
+    unsigned csum;
+    unsigned status;
+    unsigned tail_len;
+    unsigned char tail[4];
+} fw_stream;
+
+static void fw_stream_reset(void)
+{
+    fw_stream.mode = FW_STREAM_IDLE;
+    fw_stream.cmd = 0;
+    fw_stream.pkt_num = 0;
+    fw_stream.payload_left = 0;
+    fw_stream.csum = 0;
+    fw_stream.status = FW_STATUS_NONE;
+    fw_stream.tail_len = 0;
+}
+
+static void fw_consume(struct FIRMWARE_CONN *conn, unsigned n)
+{
+    memmove(conn->buf, conn->buf + n, conn->len - n);
+    conn->len -= n;
+}
+
 static void parse_firmware_stream(struct FIRMWARE_CONN *conn)
 {
-    while (conn->len >= 2u) {
-        if (conn->buf[0] != 0x12u || conn->buf[1] != 0x34u) {
-            unsigned start = 1u;
-            while (start + 1u < conn->len &&
-                   !(conn->buf[start] == 0x12u &&
-                     conn->buf[start + 1u] == 0x34u)) {
-                start++;
+    /* пока идёт стирание, Begin-шапка лежит в буфере — не разбирать
+     * повторно до завершения (recv в это время отвечает ERR_MEM) */
+    if (firmware_session.erase_active) {
+        return;
+    }
+
+    while (conn->len) {
+        if (fw_stream.mode == FW_STREAM_IDLE) {
+            if (conn->len < 2u) {
+                return;
             }
-            memmove(conn->buf, conn->buf + start, conn->len - start);
-            conn->len -= start;
+            if (conn->buf[0] != 0x12u || conn->buf[1] != 0x34u) {
+                unsigned start = 1u;
+                while (start + 1u < conn->len &&
+                       !(conn->buf[start] == 0x12u &&
+                         conn->buf[start + 1u] == 0x34u)) {
+                    start++;
+                }
+                fw_consume(conn, start);
+                continue;
+            }
+            if (conn->len < 9u) {
+                return;
+            }
+
+            unsigned payload_len = read_le16(conn->buf + 2);
+            unsigned packet_len = 2u + 2u + 4u + payload_len + 2u + 2u;
+            unsigned cmd = conn->buf[8];
+
+            if (payload_len == 0u || payload_len > FW_DATA_PAYLOAD_MAX) {
+                fw_consume(conn, 1u);
+                continue;
+            }
+
+            fw_stream.cmd = cmd;
+            fw_stream.pkt_num = read_le32(conn->buf + 4);
+            fw_stream.status = FW_STATUS_NONE;
+
+            if (cmd == FW_CMD_CPU_PRG_BEGIN) {
+                fw_stream.mode = FW_STREAM_BEGIN;
+                continue;
+            }
+            if (cmd == FW_CMD_CPU_PRG_DATA) {
+                if (!firmware_session.active) {
+                    fw_stream.status = FW_STATUS_REJECTED;
+                }
+                fw_stream.csum = checksum16(conn->buf, 9u);
+                fw_stream.payload_left = payload_len - 1u;
+                fw_stream.tail_len = 0;
+                fw_consume(conn, 9u);
+                fw_stream.mode = FW_STREAM_DATA;
+                continue;
+            }
+
+            /* служебный кадр — целиком в буфер, старый путь */
+            if (packet_len <= sizeof(conn->buf)) {
+                unsigned got = firmware_packet_size(conn->buf, conn->len);
+                if (got == 0u) {
+                    return;
+                }
+                if (got == 1u) {
+                    fw_consume(conn, 1u);
+                    continue;
+                }
+                firmware_process_payload(conn, fw_stream.pkt_num,
+                                         conn->buf + 8, payload_len);
+                fw_consume(conn, got);
+                continue;
+            }
+
+            /* неизвестный длинный кадр: дочитать и ответить ошибкой */
+            fw_stream.status = FW_STATUS_UNKNOWN_COMMAND;
+            fw_stream.csum = checksum16(conn->buf, 9u);
+            fw_stream.payload_left = payload_len - 1u;
+            fw_stream.tail_len = 0;
+            fw_consume(conn, 9u);
+            fw_stream.mode = FW_STREAM_DATA;
             continue;
         }
 
-        unsigned packet_len = firmware_packet_size(conn->buf, conn->len);
-        if (packet_len == 0u) {
+        if (fw_stream.mode == FW_STREAM_BEGIN) {
+            unsigned payload_len = read_le16(conn->buf + 2);
+            unsigned hdr_avail = payload_len - 1u;
+            if (hdr_avail > FW_HEADER_SIZE) {
+                hdr_avail = FW_HEADER_SIZE;
+            }
+            if (conn->len < 9u + hdr_avail) {
+                return;
+            }
+
+            unsigned st = firmware_begin(conn, fw_stream.pkt_num,
+                                         conn->buf + 9, hdr_avail);
+            if (st == FW_STATUS_DEFER) {
+                /* стирание запущено; шапка остаётся в буфере */
+                return;
+            }
+            fw_stream.status = st;
+            fw_stream.csum = checksum16(conn->buf, 9u + hdr_avail);
+            fw_stream.payload_left = payload_len - 1u - hdr_avail;
+            fw_stream.tail_len = 0;
+            fw_consume(conn, 9u + hdr_avail);
+            fw_stream.mode = FW_STREAM_DATA;
+            continue;
+        }
+
+        if (fw_stream.mode == FW_STREAM_DATA) {
+            unsigned chunk = conn->len;
+            if (chunk > fw_stream.payload_left) {
+                chunk = fw_stream.payload_left;
+            }
+            if (chunk) {
+                fw_stream.csum = (fw_stream.csum +
+                    checksum16(conn->buf, chunk)) & 0xffffu;
+                if (fw_stream.status == FW_STATUS_NONE &&
+                    firmware_session.active &&
+                    !firmware_process_stream_data(conn->buf, chunk)) {
+                    fw_stream.status = FW_STATUS_REJECTED;
+                }
+                fw_stream.payload_left -= chunk;
+                fw_consume(conn, chunk);
+            }
+            if (fw_stream.payload_left) {
+                return;
+            }
+            fw_stream.mode = FW_STREAM_TAIL;
+            continue;
+        }
+
+        /* FW_STREAM_TAIL: 55 AA CS CS */
+        while (fw_stream.tail_len < 4u && conn->len) {
+            fw_stream.tail[fw_stream.tail_len++] = conn->buf[0];
+            fw_consume(conn, 1u);
+        }
+        if (fw_stream.tail_len < 4u) {
             return;
         }
-        if (packet_len == 1u) {
-            memmove(conn->buf, conn->buf + 1, conn->len - 1u);
-            conn->len--;
-            continue;
+
+        unsigned expected = (fw_stream.csum + fw_stream.tail[0] +
+                             fw_stream.tail[1]) & 0xffffu;
+        unsigned actual = (unsigned)fw_stream.tail[2] |
+                          ((unsigned)fw_stream.tail[3] << 8);
+        if (fw_stream.tail[0] != 0x55u || fw_stream.tail[1] != 0xaau ||
+            expected != actual) {
+            printf("fwloader stream csum fail cmd=%d\n", fw_stream.cmd);
+            firmware_session_clear();
+            fw_stream.status = FW_STATUS_CHECKSUM_ERROR;
         }
-
-        unsigned pkt_num = read_le32(conn->buf + 4);
-        unsigned payload_len = read_le16(conn->buf + 2);
-        firmware_process_payload(conn, pkt_num, conn->buf + 8,
-                                 payload_len);
-
-        memmove(conn->buf, conn->buf + packet_len, conn->len - packet_len);
-        conn->len -= packet_len;
+        firmware_send_status(conn, fw_stream.pkt_num, fw_stream.cmd,
+                             fw_stream.status, 0, 0);
+        fw_stream.mode = FW_STREAM_IDLE;
     }
+}
+
+/* один сектор за проход главного цикла: сеть и lwIP-таймеры живут во
+ * время многосекундного стирания (фикс err=-14 на 35% erase) */
+static void service_firmware_erase(void)
+{
+    if (!firmware_session.erase_active) {
+        return;
+    }
+
+    if (!tcp_firmware.pcb) {
+        printf("fwloader erase abort: no conn\n");
+        firmware_session_clear();
+        return;
+    }
+
+    if (!flash_erase_cmd(0x20u, firmware_session.erase_addr, 5000u)) {
+        printf("fwloader erase fail addr=%x\n", firmware_session.erase_addr);
+        unsigned cmd = firmware_session.erase_cmd;
+        unsigned pkt_num = firmware_session.erase_pkt_num;
+        firmware_session_clear();
+        fw_stream_reset();
+        firmware_send_status(&tcp_firmware, pkt_num, cmd,
+                             FW_STATUS_MEM_FAIL_FPGA, 0, 0);
+        if (tcp_firmware.pcb) {
+            tcp_firmware.len = 0;
+        }
+        return;
+    }
+
+    firmware_session.erase_addr += FW_FLASH_SECTOR_SIZE;
+
+    unsigned percent = (firmware_session.erase_addr >=
+                        firmware_session.erase_size) ? 100u :
+        ((firmware_session.erase_addr / FW_FLASH_SECTOR_SIZE) * 100u /
+         (firmware_session.erase_size / FW_FLASH_SECTOR_SIZE));
+    if (firmware_session.erase_last_percent == 101u || percent == 100u ||
+        percent >= firmware_session.erase_last_percent +
+                   FW_FLASH_ERASE_PROGRESS_STEP) {
+        firmware_send_status(&tcp_firmware, firmware_session.erase_pkt_num,
+                             firmware_session.erase_cmd,
+                             FW_STATUS_ERASE_PERCENT, percent, 1);
+        firmware_session.erase_last_percent = percent;
+    }
+
+    if (firmware_session.erase_addr < firmware_session.erase_size) {
+        return;
+    }
+
+    firmware_session.erase_active = 0;
+    firmware_session.erase_done = 1;
+    printf("fwloader erase done size=%d\n", firmware_session.erase_size);
+
+    if (firmware_session.erase_cmd == FW_CMD_ERASE_FPGA_FLASH) {
+        firmware_send_status(&tcp_firmware, firmware_session.erase_pkt_num,
+                             FW_CMD_ERASE_FPGA_FLASH, FW_STATUS_NONE, 0, 0);
+        firmware_session.erase_done = 0;
+        return;
+    }
+
+    /* Begin ждал стирания: пакет всё ещё первый в буфере соединения */
+    parse_firmware_stream(&tcp_firmware);
 }
 
 static void firmware_selftest(void)
@@ -1951,7 +2227,7 @@ static void firmware_selftest(void)
     }
     write_le32(buf + 8, FW_FLASH_PAGE_SIZE * 2u);
     write_le32(buf + 12, crc);
-    write_le32(buf + 128, FW_FPGA_MAGIC);
+    write_le32(buf + FW_MAGIC_OFFSET, FW_FPGA_MAGIC);
 
     unsigned st = firmware_begin(0, 0, buf, FW_HEADER_SIZE);
     for (unsigned i = 0; i < FW_FLASH_PAGE_SIZE; i++) {
@@ -2164,7 +2440,7 @@ static void build_discovery_response(unsigned char out[LIDAR_DISCOVERY_RESPONSE_
     write_le16(out + 36, runtime_config.data_remote_port);
     write_le16(out + 38, runtime_config.cmd_port);
     write_le16(out + 40, runtime_config.cmd_remote_port);
-    write_le16(out + 42, 0);
+    write_le16(out + 42, LIDARSIM_FIRMWARE_PORT);
     write_le16(out + 44, runtime_config.discovery_port);
     for (unsigned i = 0; i < (sizeof(model) - 1u); i++) {
         out[46 + i] = (unsigned char)model[i];
@@ -2186,10 +2462,12 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         return;
     }
 
-    unsigned char packet[LIDARSIM_CONTROL_BUF_MAX];
+    /* на 50103 легальны только запрос 17 Б, ACTION 25 Б и NET_CONFIG
+     * 35 Б — большой буфер здесь лишь давил на стек */
+    unsigned char packet[64];
     unsigned len = p->tot_len;
-    if (len > LIDARSIM_CONTROL_BUF_MAX) {
-        len = LIDARSIM_CONTROL_BUF_MAX;
+    if (len > sizeof(packet)) {
+        len = sizeof(packet);
     }
     pbuf_copy_partial(p, packet, (u16_t)len, 0);
     pbuf_free(p);
@@ -2215,6 +2493,54 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     unsigned packet_len = control_packet_size(packet, len);
     if (packet_len > 1u && packet[5] == LIDAR_CMD_NET_CONFIG) {
         process_control_packet_udp(pcb, addr, port, packet);
+        return;
+    }
+
+    /* LIDAR_ACTION на discovery-порту: так lconf --reset-before-flash
+     * перезапускает лидар перед заливкой. ACK настоящего МК — A0 c
+     * MAC+action и флагом READ, широковещательно на порт отправителя. */
+    if (packet_len == 25u && packet[3] == LIDAR_PROTO_FIXED &&
+        packet[5] == LIDAR_CMD_LIDAR_ACTION &&
+        packet[6] == LIDAR_PROTO_WRITE) {
+        unsigned mac_match = 1;
+        for (unsigned i = 0; i < 6u; i++) {
+            if (packet[7 + i] != runtime_config.mac[i]) {
+                mac_match = 0;
+                break;
+            }
+        }
+        if (!mac_match) {
+            return;
+        }
+
+        unsigned action = read_le32(packet + 13);
+        unsigned char reply[25];
+        reply[0] = 0xff;
+        reply[1] = 0xfe;
+        reply[2] = LIDAR_PROTO_VERSION;
+        reply[3] = LIDAR_PROTO_FIXED;
+        reply[4] = packet[4];
+        reply[5] = LIDAR_CMD_LIDAR_ACTION;
+        reply[6] = LIDAR_PROTO_READ;
+        for (unsigned i = 0; i < 16u; i++) {
+            reply[7 + i] = packet[7 + i];
+        }
+        reply[23] = 0xff;
+        reply[24] = 0x9b;
+        err_t ack_err = send_udp_broadcast_bytes(pcb, port, reply,
+                                                 sizeof(reply));
+        printf("lidarsim action=%d ack=%d\n", action, ack_err);
+        if (action == 0u) {
+            /* «перезагрузка»: имитатору достаточно свежей сессии
+             * загрузчика — сервисы остаются жить */
+            firmware_session_clear();
+            fw_stream_reset();
+            if (tcp_firmware.pcb) {
+                tcp_abort(tcp_firmware.pcb);
+                tcp_firmware.pcb = 0;
+                tcp_firmware.len = 0;
+            }
+        }
     }
 }
 
@@ -2307,6 +2633,7 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
             conn->len = 0;
         }
         firmware_session_clear();
+        fw_stream_reset();
         printf("fwloader tcp closed\n");
         if (tcp_close(tpcb) != ERR_OK) {
             tcp_abort(tpcb);
@@ -2315,15 +2642,28 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
         return ERR_OK;
     }
 
+    /* во время стирания приём отклоняется: lwIP придержит pbuf и
+     * передоставит его после (tcp_recved не вызывается — окно закрыто) */
+    if (firmware_session.erase_active) {
+        return ERR_MEM;
+    }
+
     tcp_recved(tpcb, p->tot_len);
     for (struct pbuf *q = p; q != 0; q = q->next) {
         unsigned char *src = (unsigned char *)q->payload;
         for (u16_t i = 0; i < q->len; i++) {
+            if (conn->len >= sizeof(conn->buf)) {
+                /* полный буфер: сперва разобрать накопленное (кадры
+                 * идут подряд при окне из 8 блоков) */
+                parse_firmware_stream(conn);
+                if (conn->len >= sizeof(conn->buf)) {
+                    conn->len = 0;
+                    firmware_session_clear();
+                    printf("fwloader rx overflow\n");
+                }
+            }
             if (conn->len < sizeof(conn->buf)) {
                 conn->buf[conn->len++] = src[i];
-            } else {
-                conn->len = 0;
-                firmware_session_clear();
             }
         }
     }
@@ -2341,6 +2681,7 @@ static void tcp_firmware_err(void *arg, err_t err)
         conn->len = 0;
     }
     firmware_session_clear();
+    fw_stream_reset();
     printf("fwloader tcp err=%d\n", err);
 }
 
@@ -2358,6 +2699,7 @@ static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     }
 
     firmware_session_clear();
+    fw_stream_reset();
     tcp_firmware.pcb = newpcb;
     tcp_firmware.len = 0;
     tcp_arg(newpcb, &tcp_firmware);
@@ -3553,6 +3895,7 @@ int main(void)
         service_arp_refresh();
 #endif
         DIAG_CTX(3);
+        service_firmware_erase();
         service_msop_tcp();
 #ifdef LIDARSIM_DIAG_BEACON
         diag_loop_ticks++;
