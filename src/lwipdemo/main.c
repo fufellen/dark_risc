@@ -543,6 +543,18 @@ static void print_hex_byte(unsigned value)
     print_hex_nibble(value);
 }
 
+/* Событийный лог (discovery, connect/close, флаги RX) — это спам на живом
+ * UART: каждый символ busy-wait ~87 мкс, а строки занимают .data, которой
+ * в 64 КБ BRAM уже не осталось. Включать сборкой -DLIDARSIM_VERBOSE=1. */
+#ifndef LIDARSIM_VERBOSE
+#define LIDARSIM_VERBOSE 0
+#endif
+#if LIDARSIM_VERBOSE
+#define LOGV(...) printf(__VA_ARGS__)
+#else
+#define LOGV(...) do { } while (0)
+#endif
+
 static void print_config(void)
 {
     printf("lidarsim cfg mac=");
@@ -2472,7 +2484,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     pbuf_copy_partial(p, packet, (u16_t)len, 0);
     pbuf_free(p);
 
-    printf("lidarsim discovery rx len=%d port=%d\n", len, port);
+    LOGV("lidarsim discovery rx len=%d port=%d\n", len, port);
 
     if (is_discovery_request(packet, len)) {
         unsigned char reply[LIDAR_DISCOVERY_RESPONSE_SIZE];
@@ -2480,7 +2492,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         err_t broadcast_err = send_udp_broadcast_bytes(pcb, port, reply, sizeof(reply));
         err_t direct_err = send_udp_unicast_to_last_peer(
             (u16_t)runtime_config.discovery_port, port, reply, sizeof(reply));
-        printf("lidarsim discovery reply broadcast=%d direct=%d\n",
+        LOGV("lidarsim discovery reply broadcast=%d direct=%d\n",
                broadcast_err, direct_err);
         if ((broadcast_err == ERR_OK || direct_err == ERR_OK) &&
             sim_progress_flags != 0xffu) {
@@ -2529,7 +2541,7 @@ static void udp_discovery_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         reply[24] = 0x9b;
         err_t ack_err = send_udp_broadcast_bytes(pcb, port, reply,
                                                  sizeof(reply));
-        printf("lidarsim action=%d ack=%d\n", action, ack_err);
+        LOGV("lidarsim action=%d ack=%d\n", action, ack_err);
         if (action == 0u) {
             /* «перезагрузка»: имитатору достаточно свежей сессии
              * загрузчика — сервисы остаются жить */
@@ -2612,7 +2624,7 @@ static err_t tcp_command_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_arg(newpcb, &tcp_control);
     tcp_recv(newpcb, tcp_control_recv);
     tcp_err(newpcb, tcp_control_err);
-    printf("lidarsim tcp command connected\n");
+    LOGV("lidarsim tcp command connected\n");
     return ERR_OK;
 }
 
@@ -2634,7 +2646,7 @@ static err_t tcp_firmware_recv(void *arg, struct tcp_pcb *tpcb,
         }
         firmware_session_clear();
         fw_stream_reset();
-        printf("fwloader tcp closed\n");
+        LOGV("fwloader tcp closed\n");
         if (tcp_close(tpcb) != ERR_OK) {
             tcp_abort(tpcb);
             return ERR_ABRT;   /* aborted our own pcb -> must not return ERR_OK */
@@ -2705,7 +2717,7 @@ static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_arg(newpcb, &tcp_firmware);
     tcp_recv(newpcb, tcp_firmware_recv);
     tcp_err(newpcb, tcp_firmware_err);
-    printf("fwloader tcp connected\n");
+    LOGV("fwloader tcp connected\n");
     return ERR_OK;
 }
 
@@ -2789,7 +2801,7 @@ static err_t tcp_data_recv(void *arg, struct tcp_pcb *tpcb,
             tcp_data_client = 0;
         }
         msop_tx_reset();
-        printf("lidarsim tcp data closed\n");
+        LOGV("lidarsim tcp data closed\n");
         if (tcp_close(tpcb) != ERR_OK) {
             tcp_abort(tpcb);
             return ERR_ABRT;   /* aborted our own pcb -> must not return ERR_OK */
@@ -2808,7 +2820,7 @@ static void tcp_data_err(void *arg, err_t err)
     (void)arg;
     tcp_data_client = 0;
     msop_tx_reset();
-    printf("lidarsim tcp data err=%d\n", err);
+    LOGV("lidarsim tcp data err=%d\n", err);
 }
 
 static err_t tcp_data_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
@@ -2831,7 +2843,7 @@ static err_t tcp_data_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_sent(newpcb, tcp_data_sent);
     tcp_err(newpcb, tcp_data_err);
     msop_tx_reset();
-    printf("lidarsim tcp data connected\n");
+    LOGV("lidarsim tcp data connected\n");
     return ERR_OK;
 }
 
@@ -3578,7 +3590,7 @@ static err_t poll_rx_frame(void)
         unsigned now_ms = sys_now();
         if (!rx_flags_ms || ((now_ms - rx_flags_ms) >= 5000u)) {
             rx_flags_ms = now_ms ? now_ms : 1u;
-            printf("lidarsim rx flags=%x\n", eth->status);
+            LOGV("lidarsim rx flags=%x\n", eth->status);
         }
         eth->rx_ctrl = ETH_RX_CTRL_CLEAR_FLAGS;
     }
