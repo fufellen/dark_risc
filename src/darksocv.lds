@@ -36,7 +36,7 @@ MEMORY
     MEM (rwx)  : ORIGIN = 0x00000000, LENGTH = MLEN
     /* darkxram на слоте XADDR[31:30]==3: сюда уходят .bss и стек,
        иначе стек упирается в .bss и остаются сотни байт */
-    XRAM (rw)  : ORIGIN = 0xE0000000, LENGTH = 8K
+    XRAM (rw)  : ORIGIN = 0xE0000000, LENGTH = 16K
 }
 
 SECTIONS

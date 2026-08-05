@@ -52,10 +52,10 @@
 #elif defined(LIDARSIM_DDR3_DIAG)
 #define MEM_SIZE                        1024
 #else
-/* MSOP идёт nocopy (tcp_write flags=0), heap нужен только под
- * заголовки/сегменты — 1024 проверено на железе в DDR3_DIAG-профиле;
- * освобождённый килобайт ушёл потоковому загрузчику 50102 */
-#define MEM_SIZE                        1024
+/* MSOP идёт nocopy, но ответы командного канала — COPY со стека:
+ * ответ 0x45 с чанком 1 КиБ занимает 1041 Б и в кучу 1024 не влезал
+ * (tcp_write возвращал ERR_MEM, ответ молча не уходил) */
+#define MEM_SIZE                        2560
 #endif
 #define MEMP_MEM_MALLOC                 0
 #define MEM_LIBC_MALLOC                 0
@@ -66,9 +66,10 @@
 #define MEMP_NUM_TCP_PCB                4
 #define MEMP_NUM_TCP_PCB_LISTEN         3
 #ifdef LIDARSIM_DIAG_BEACON
-#define MEMP_NUM_TCP_SEG                4
+#define MEMP_NUM_TCP_SEG                8
 #else
-#define MEMP_NUM_TCP_SEG                6
+#define MEMP_NUM_TCP_SEG                8
+#define TCP_SND_QUEUELEN                8
 #endif
 #define MEMP_NUM_SYS_TIMEOUT            6
 #define MEMP_NUM_NETBUF                 0
@@ -78,19 +79,26 @@
 /* 4 x 256: RX-кадры больше ~1000 Б отбрасываются (MSOP — только TX;
  * командные и loader-сегменты при TCP_MSS 512 занимают <=3 pbuf) */
 #define PBUF_POOL_SIZE                  4
-#define PBUF_POOL_BUFSIZE               256
+/* вмещает сегмент MSS 560 + заголовки; 256 резал окно приёма */
+#define PBUF_POOL_BUFSIZE               640
 
-#define TCP_MSS                         512
-#define TCP_WND                         TCP_MSS
+/* Кадр MSOP 1118 Б при MSS 512 = 3 сегмента: нечётный хвост попадает
+ * под delayed-ACK Windows (~200 мс), однобуферный nocopy ждёт ACK, и
+ * поток проседает до ~24 fps с паузами. MSS 560 укладывает кадр ровно
+ * в 2 сегмента — ACK уходит сразу. */
+#define TCP_MSS                         560
+/* окно приёма 1*MSS душило заливку 50102 стоп-эндом: шире окно — больше
+ * сегментов в полёте, пока страница пишется во FLASH */
+#define TCP_WND                         (3 * TCP_MSS)
 #ifdef LIDARSIM_DIAG_BEACON
 /* кадр MSOP с интенсивностью = 1118 Б: 2*MSS=1024 его не пропускает */
-#define TCP_SND_BUF                     (3 * TCP_MSS)
-#define TCP_SND_QUEUELEN                4
+#define TCP_SND_BUF                     (4 * TCP_MSS)
+#define TCP_SND_QUEUELEN                8
 #define TCP_SNDQUEUELOWAT               3
 #else
 /* кадр MSOP с интенсивностью = 1118 Б: 2*MSS=1024 его не пропускает */
-#define TCP_SND_BUF                     (3 * TCP_MSS)
-#define TCP_SND_QUEUELEN                6
+#define TCP_SND_BUF                     (4 * TCP_MSS)
+#define TCP_SND_QUEUELEN                8
 #endif
 #define TCP_OVERSIZE                    0
 #define TCP_LISTEN_BACKLOG              0

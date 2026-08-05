@@ -122,8 +122,8 @@
 /* один MSOP-буфер (как в DDR3_DIAG): освобождает 758 Б под потоковый
  * загрузчик и запас стека; на LAN однобуферный nocopy держит 50 к/с */
 #define LIDARSIM_MSOP_TX_BUFFERS  1u
-#define LIDARSIM_CONTROL_BUF_MAX  320u
-#define LIDARSIM_CONTROL_REPLY_MAX 320u
+#define LIDARSIM_CONTROL_BUF_MAX  1360u
+#define LIDARSIM_CONTROL_REPLY_MAX 1360u
 /* актуальный lconf шлёт CpuPrgData-блоки до 1793 байт payload (кадр
  * 1805 Б) — целиком в 64 КиБ RAM они не буферизуются, большие кадры
  * 55/56 разбираются потоково; буфера хватает на шапку файла 512 Б
@@ -2753,6 +2753,7 @@ static err_t tcp_command_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_control.pcb = newpcb;
     tcp_control.len = 0;
     tcp_arg(newpcb, &tcp_control);
+    tcp_nagle_disable(newpcb);   /* хвост ответа >MSS не должен ждать ACK */
     tcp_recv(newpcb, tcp_control_recv);
     tcp_err(newpcb, tcp_control_err);
     LOGV("lidarsim tcp command connected\n");
@@ -2846,6 +2847,7 @@ static err_t tcp_firmware_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_firmware.pcb = newpcb;
     tcp_firmware.len = 0;
     tcp_arg(newpcb, &tcp_firmware);
+    tcp_nagle_disable(newpcb);   /* хвост ответа >MSS не должен ждать ACK */
     tcp_recv(newpcb, tcp_firmware_recv);
     tcp_err(newpcb, tcp_firmware_err);
     LOGV("fwloader tcp connected\n");

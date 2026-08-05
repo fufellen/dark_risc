@@ -287,7 +287,13 @@
 // Дополнительная память данных на свободном слоте XADDR[31:30]==3:
 // линкер уводит туда стек и .bss, освобождая 2**MLEN под код.
 `define DARKXRAM_CS3
+// DDR3-профиль ужат до 8 КиБ ради BSRAM; имитатору 16 КиБ — куча lwIP
+// выросла под ответы командного канала с чанком 1 КиБ
+`ifdef DARKDDR3_MMIO
 `define DARKXRAM_LEN 13   // 8 КиБ
+`else
+`define DARKXRAM_LEN 14   // 16 КиБ
+`endif
 
 `define MLEN 16 // 13: 8kB for darkshell
                 // 15: 32kB, for coremark
