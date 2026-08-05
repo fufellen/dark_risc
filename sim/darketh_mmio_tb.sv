@@ -294,6 +294,32 @@ module darketh_mmio_tb;
         mmio_read(REG_TX_STATUS, data);
         check_equal(data, STATUS_TX_READY, "tx flags cleared");
 
+        // Регрессия клина 05.08.2026: кадр, пришедший при занятом буфере,
+        // ставит липкий overflow; после RELEASE следующий ПОЛНЫЙ кадр обязан
+        // опубликоваться, несмотря на невычищенный флаг. Раньше условие
+        // публикации требовало !rx_overflow, и приём умирал навсегда.
+        mmio_write(REG_RX_CTRL, 32'h0000_0002);   // чистые флаги на входе
+        foreach (sample_frame[i]) feed_byte(sample_frame[i]);
+        commit_frame();                            // кадр A занял буфер
+        feed_byte(8'hde); feed_byte(8'had);
+        commit_frame();                            // кадр B при занятом: потерян
+        mmio_read(REG_STATUS, data);
+        check_equal(data & (STATUS_RX_AVAILABLE | STATUS_RX_OVERFLOW | STATUS_RX_DROPPED),
+                    STATUS_RX_AVAILABLE | STATUS_RX_OVERFLOW | STATUS_RX_DROPPED,
+                    "wedge: A available, sticky flags set");
+        foreach (sample_frame[i]) begin
+            mmio_read(REG_RX_DATA, data);
+        end
+        mmio_write(REG_RX_CTRL, 32'h0000_0001);    // RELEASE без CLEAR_FLAGS
+        foreach (sample_frame[i]) feed_byte(sample_frame[i]);
+        commit_frame();                            // кадр C: полный
+        mmio_read(REG_STATUS, data);
+        check_equal(data & STATUS_RX_AVAILABLE, STATUS_RX_AVAILABLE,
+                    "wedge: C published despite sticky overflow");
+        mmio_read(REG_RX_LEN, data);
+        check_equal(data, 32'd6, "wedge: C full length");
+        mmio_write(REG_RX_CTRL, 32'h0000_0003);    // прибрать за собой
+
         $display("TEST PASS: darketh_mmio rx tx");
         $finish;
     end

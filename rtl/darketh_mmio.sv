@@ -89,6 +89,8 @@ module darketh_mmio #(
     logic [PTR_WIDTH-1:0] tx_send_idx = '0;
 
     logic [1:0] dtack = '0;
+    // кадр, начало которого потеряно из-за занятого буфера
+    logic rx_partial = 1'b0;
 
     wire read_start = XDREQ && XRD && (dtack == 0);
     wire write_start = XDREQ && XWR;
@@ -118,6 +120,7 @@ module darketh_mmio #(
             rx_write_len <= '0;
             rx_frame_len <= '0;
             rx_read_idx <= '0;
+            rx_partial <= 1'b0;
             tx_byte_valid <= 1'b0;
             tx_byte <= 8'd0;
             tx_frame_start <= 1'b0;
@@ -141,18 +144,29 @@ module darketh_mmio #(
                 rx_busy <= 1'b1;
 
                 if (rx_frame_available) begin
+                    // буфер занят: байт потерян, кадр помечается неполным.
+                    // rx_overflow — липкая статистика для CPU и НЕ должен
+                    // блокировать публикацию следующих кадров: раньше один
+                    // просроченный drain убивал приём навсегда (клин
+                    // 05.08.2026: st=0106, RX_AVAILABLE не взводился, все
+                    // кадры уходили в dropped до перезагрузки).
                     rx_overflow <= 1'b1;
+                    rx_partial <= 1'b1;
                 end else if (rx_write_len < MAX_FRAME_BYTES[PTR_WIDTH-1:0]) begin
                     rx_mem[rx_write_len] <= rx_byte;
                     rx_write_len <= rx_write_len + 1'b1;
                 end else begin
+                    // переполнение длины: байт потерян, кадр неполный —
+                    // публиковать его усечённым нельзя
                     rx_overflow <= 1'b1;
+                    rx_partial <= 1'b1;
                 end
             end
 
             if (rx_frame_valid) begin
                 rx_busy <= 1'b0;
-                if (!rx_frame_available && !rx_overflow && (rx_write_len != 0)) begin
+                rx_partial <= 1'b0;
+                if (!rx_frame_available && !rx_partial && (rx_write_len != 0)) begin
                     rx_frame_available <= 1'b1;
                     rx_frame_len <= rx_write_len;
                     rx_read_idx <= '0;
@@ -164,6 +178,7 @@ module darketh_mmio #(
 
             if (rx_frame_drop) begin
                 rx_busy <= 1'b0;
+                rx_partial <= 1'b0;
                 rx_dropped <= 1'b1;
                 rx_write_len <= '0;
             end

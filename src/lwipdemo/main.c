@@ -3562,6 +3562,19 @@ static void handle_uart_command(char *line)
         return;
     }
 
+    if (command_is(line, "eth")) {
+        /* диагностика клина сети: статусы MMIO, тест пула pbuf */
+        printf("eth st=%x txst=%x streak=%d\n", eth->status,
+               eth->tx_status, rx_nopbuf_streak);
+        struct pbuf *probe = pbuf_alloc(PBUF_RAW, 64, PBUF_POOL);
+        printf("pbuf pool %s\n", probe ? "ok" : "EMPTY");
+        if (probe) pbuf_free(probe);
+        probe = pbuf_alloc(PBUF_RAW, 64, PBUF_RAM);
+        printf("pbuf ram %s\n", probe ? "ok" : "EMPTY");
+        if (probe) pbuf_free(probe);
+        return;
+    }
+
     if (command_is(line, "ddrwin")) {
         /* прозрачное окно DDR3: обычные load/store по 0xD0000000.
          * Маркеры по разным адресам заодно показывают, где начинается
@@ -3672,6 +3685,11 @@ static err_t poll_rx_frame(void)
 {
     unsigned status = eth->status;
     if (!(status & ETH_STATUS_RX_AVAILABLE)) {
+        /* страховка от клина: липкие overflow/dropped при пустом буфере
+         * чистим сразу, не дожидаясь следующего принятого кадра */
+        if (status & (ETH_STATUS_RX_OVERFLOW | ETH_STATUS_RX_DROPPED)) {
+            eth->rx_ctrl = ETH_RX_CTRL_CLEAR_FLAGS;
+        }
         return ERR_OK;
     }
 #ifdef LIDARSIM_DIAG_BEACON
