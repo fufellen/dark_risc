@@ -946,6 +946,20 @@ module darksimv;
     wire W_SPI_MOSI;
     tri1 W_SPI_MISO;
 
+`ifdef LIDARSIM_FLASH_SIM
+    /*
+        Модель конфигурационной FLASH на выборке bit-bang (OPORT[2] через
+        spi_master_bb). Без неё обращения к флешу в симуляции подменяются
+        заглушкой внутри прошивки, и шина SPI не проверяется вовсе.
+    */
+    spi_flash_model flash_mock (
+        .cs_n(W_SPI_CSN),
+        .sck(W_SPI_SCK),
+        .mosi(W_SPI_MOSI),
+        .miso(W_SPI_MISO)
+    );
+`endif
+
 `ifdef DARKWIZNET_SIM
     w5500_model w5500_mock (
         .sck(W_SPI_SCK),

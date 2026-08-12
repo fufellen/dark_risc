@@ -1316,7 +1316,9 @@ static void firmware_send_status(struct FIRMWARE_CONN *conn, unsigned pkt_num,
 
 static void spibb_delay(void)
 {
-    static volatile unsigned sink;
+    /* Ненулевой начальный код кладёт переменную в загружаемую секцию: в
+       симуляции .bss не обнулён, и чтение из него роняет ядро. */
+    static volatile unsigned sink = 1;
     for (unsigned i = 0; i < 3u; i++) {
         sink++;
     }
@@ -1344,14 +1346,33 @@ static void spibb_deselect(void)
     spibb_idle();
 }
 
+
+
+/*
+    Ускоренный обмен байтом.
+
+    Убрана выдержка между записями в порт. Она стоила больше самой шины: цикл
+    из трёх обращений к volatile-переменной на каждую полуфазу такта, то есть
+    время уходило на ожидание, а не на передачу.
+
+    Порядок фронтов и точка чтения оставлены прежними, и это не небрежность.
+    В режиме 0 ведомый выставляет бит по спаду и держит его до следующего
+    спада, поэтому читать линию надо ПОЗДНО — сразу после нарастающего фронта,
+    когда бит уже проделал путь «шина SoC → пад → микросхема → пад → входной
+    регистр». Соблазн переставить чтение раньше выглядит безобидным и ломает
+    приём: данные приезжают сдвинутыми, а осциллограмма при этом здоровая.
+
+    Запас на этом пути и проверяется моделью микросхемы в симуляции: она
+    выдерживает бит после спада, как настоящая, и сдвиг вылезает сразу.
+*/
 static unsigned char spibb_transfer_byte(unsigned char value)
 {
     unsigned char rx = 0;
 
     for (int bit = 7; bit >= 0; bit--) {
         unsigned mosi = (value & (1u << bit)) ? SPIBB_MOSI : 0u;
-        spibb_write(SPIBB_EN | mosi);
-        spibb_write(SPIBB_EN | SPIBB_SCK | mosi);
+        io->oport = SPIBB_EN | mosi;                /* спад такта */
+        io->oport = SPIBB_EN | SPIBB_SCK | mosi;    /* фронт: ведомый берёт бит */
         rx = (unsigned char)((rx << 1) |
              ((io->iport & SPIBB_MISO) ? 1u : 0u));
     }
@@ -1402,6 +1423,10 @@ static unsigned flash_read_status(void)
     return status;
 }
 
+/* Взводится записью и стиранием: чтение обязано дождаться готовности только
+   после них, а не перед каждым блоком. */
+static unsigned flash_maybe_busy = 0;
+
 static unsigned flash_wait_ready(unsigned timeout_ms)
 {
     unsigned start = sys_now();
@@ -1443,7 +1468,12 @@ static unsigned flash_erase_cmd(unsigned cmd, unsigned addr,
     spibb_transfer_byte((unsigned char)cmd);
     flash_addr24(addr);
     spibb_deselect();
-    return flash_wait_ready(timeout_ms);
+    flash_maybe_busy = 1;
+    if (!flash_wait_ready(timeout_ms)) {
+        return 0;
+    }
+    flash_maybe_busy = 0;
+    return 1;
 }
 
 static unsigned flash_page_program(unsigned addr, const unsigned char *data,
@@ -1464,7 +1494,12 @@ static unsigned flash_page_program(unsigned addr, const unsigned char *data,
         spibb_transfer_byte(data[i]);
     }
     spibb_deselect();
-    return flash_wait_ready(500u);
+    flash_maybe_busy = 1;
+    if (!flash_wait_ready(500u)) {
+        return 0;
+    }
+    flash_maybe_busy = 0;
+    return 1;
 }
 
 static unsigned firmware_flash_write(unsigned addr, const unsigned char *data,
@@ -1499,8 +1534,22 @@ static unsigned flash_read_bytes(unsigned addr, unsigned char *data,
         }
         return 1;
     }
-    if (!flash_wait_ready(5000u)) {
-        return 0;
+    /*
+        Опрос готовности перед чтением снят намеренно.
+
+        Ждать надо после записи и стирания — только они оставляют микросхему
+        занятой. Перед чтением этот опрос был лишней транзакцией на каждый
+        блок: выбор, команда состояния, ответ, снятие выбора. При вычитке всей
+        памяти блоками это тысячи лишних транзакций на ровном месте.
+
+        Безопасность сохранена флагом: запись и стирание его взводят, и первое
+        же чтение после них дожидается готовности честно.
+    */
+    if (flash_maybe_busy) {
+        if (!flash_wait_ready(5000u)) {
+            return 0;
+        }
+        flash_maybe_busy = 0;
     }
 
     spibb_select();
@@ -1917,6 +1966,7 @@ static void parse_firmware_stream(struct FIRMWARE_CONN *conn)
         conn->len -= packet_len;
     }
 }
+
 
 static void firmware_selftest(void)
 {
