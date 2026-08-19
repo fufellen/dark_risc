@@ -84,7 +84,10 @@
 #define LIDARSIM_CMD_PORT         50101u
 #define LIDARSIM_FIRMWARE_PORT    50102u
 #define LIDARSIM_MODEL            "R120_FAKE"
-#define LIDARSIM_FIRMWARE         "pegus_1"
+/* Номер поднимается при КАЖДОЙ сборке, даже косметической: по нему
+   отвечают на вопрос «что сейчас работает на плате», и одинаковый номер у
+   двух разных сборок делает любой снятый с прибора замер недоказуемым. */
+#define LIDARSIM_FIRMWARE         "pegus_2"
 #define LIDARSIM_MSOP_POINTS      180u
 #define LIDARSIM_MSOP_DISTANCE_BYTES 2u
 #define LIDARSIM_MSOP_INTENSITY_BYTES 0u

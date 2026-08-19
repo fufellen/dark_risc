@@ -946,6 +946,10 @@ module darksimv;
     wire W_SPI_MOSI;
     tri1 W_SPI_MISO;
 
+`ifdef STACK_PROBE
+    stack_probe probe0();
+`endif
+
 `ifdef LIDARSIM_FLASH_SIM
     /*
         Модель конфигурационной FLASH на выборке bit-bang (OPORT[2] через

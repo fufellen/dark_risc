@@ -19,3 +19,7 @@ bazel-bin
 bazel-darkriscv
 bazel-out
 bazel-testlogs
+
+# Рабочая библиотека ModelSim: пересоздаётся каждым прогоном, в Git не нужна.
+# Без этой строки она держит дерево грязным и мешает выпускать прошивку.
+sim/work/
