@@ -19,3 +19,8 @@ bazel-bin
 bazel-darkriscv
 bazel-out
 bazel-testlogs
+
+# Сборочные каталоги Verilator и временные замеры симуляторов: порождаются
+# скриптом, в истории им делать нечего.
+sim/verilator/obj_dir/
+sim/msbench/
